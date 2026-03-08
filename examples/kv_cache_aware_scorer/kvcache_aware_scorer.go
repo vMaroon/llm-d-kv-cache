@@ -118,7 +118,7 @@ func New(ctx context.Context, config PrecisePrefixCachePluginConfig) (*PrecisePr
 	go kvCacheIndexer.Run(ctx)
 
 	// initialize the KV-events pool
-	pool := kvevents.NewPool(config.KVEventsConfig, kvCacheIndexer.KVBlockIndex(), tokenProcessor, engineadapter.NewVLLMAdapter(), engineadapter.KeyFromVLLMTopic)
+	pool := kvevents.NewPool(config.KVEventsConfig, kvCacheIndexer.KVBlockIndex(), tokenProcessor, engineadapter.NewVLLMAdapter())
 	pool.Start(ctx)
 
 	subscribersManager := kvevents.NewSubscriberManager(pool)

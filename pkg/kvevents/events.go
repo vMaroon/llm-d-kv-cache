@@ -57,6 +57,10 @@ type EngineAdapter interface {
 	// It extracts pod identity and model name from the topic,
 	// and decodes the payload into an EventBatch.
 	ParseMessage(msg *RawMessage) (podID, modelName string, batch EventBatch, err error)
+
+	// ShardingKey extracts the key used to shard messages across worker queues.
+	// Messages with the same sharding key are guaranteed to be processed in order.
+	ShardingKey(msg *RawMessage) string
 }
 
 // BlockStoredEvent represents blocks being added to the cache.

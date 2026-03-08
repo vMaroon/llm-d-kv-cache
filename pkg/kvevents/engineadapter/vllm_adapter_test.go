@@ -40,11 +40,12 @@ func TestParseVLLMTopic_NoModel(t *testing.T) {
 	assert.Equal(t, "", modelName)
 }
 
-// TestKeyFromVLLMTopic tests the exported key extraction function.
-func TestKeyFromVLLMTopic(t *testing.T) {
-	assert.Equal(t, "pod-123", KeyFromVLLMTopic("kv@pod-123@llama-2-7b"))
-	assert.Equal(t, "pod-123", KeyFromVLLMTopic("kv@pod-123"))
-	assert.Equal(t, "fallback", KeyFromVLLMTopic("fallback"))
+// TestShardingKey tests the sharding key extraction from raw messages.
+func TestShardingKey(t *testing.T) {
+	adapter := NewVLLMAdapter()
+	assert.Equal(t, "pod-123", adapter.ShardingKey(&kvevents.RawMessage{Topic: "kv@pod-123@llama-2-7b"}))
+	assert.Equal(t, "pod-123", adapter.ShardingKey(&kvevents.RawMessage{Topic: "kv@pod-123"}))
+	assert.Equal(t, "fallback", adapter.ShardingKey(&kvevents.RawMessage{Topic: "fallback"}))
 }
 
 // TestParseMessage_Valid tests full message parsing through the adapter.

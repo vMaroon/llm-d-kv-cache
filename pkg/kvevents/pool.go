@@ -89,7 +89,6 @@ type Pool struct {
 	index          kvblock.Index
 	tokenProcessor kvblock.TokenProcessor
 	adapter        EngineAdapter
-	keyFromTopic   func(string) string
 	wg             sync.WaitGroup
 }
 
@@ -97,7 +96,7 @@ type Pool struct {
 // Subscribers are managed by SubscriberManager which is controlled by the pod
 // reconciler.
 func NewPool(cfg *Config, index kvblock.Index, tokenProcessor kvblock.TokenProcessor,
-	adapter EngineAdapter, keyFromTopic func(string) string,
+	adapter EngineAdapter,
 ) *Pool {
 	if cfg == nil {
 		cfg = DefaultConfig()
@@ -109,7 +108,6 @@ func NewPool(cfg *Config, index kvblock.Index, tokenProcessor kvblock.TokenProce
 		index:          index,
 		tokenProcessor: tokenProcessor,
 		adapter:        adapter,
-		keyFromTopic:   keyFromTopic,
 	}
 
 	for i := 0; i < p.concurrency; i++ {
@@ -149,7 +147,7 @@ func (p *Pool) Shutdown(ctx context.Context) {
 // It hashes the sharding key to select a queue, ensuring messages for the
 // same pod always go to the same worker (ordered queue).
 func (p *Pool) AddTask(task *RawMessage) {
-	key := p.keyFromTopic(task.Topic)
+	key := p.adapter.ShardingKey(task)
 	// Use an FNV-1a hash to deterministically select a queue.
 	h := fnv.New32a()
 	_, err := h.Write([]byte(key))

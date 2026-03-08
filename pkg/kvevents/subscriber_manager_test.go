@@ -38,7 +38,7 @@ func TestSubscriberManager_EnsureSubscriber(t *testing.T) {
 	poolConfig := kvevents.DefaultConfig()
 	tokenProcessor, err := kvblock.NewChunkedTokenDatabase(kvblock.DefaultTokenProcessorConfig())
 	require.NoError(t, err)
-	pool := kvevents.NewPool(poolConfig, index, tokenProcessor, engineadapter.NewVLLMAdapter(), engineadapter.KeyFromVLLMTopic)
+	pool := kvevents.NewPool(poolConfig, index, tokenProcessor, engineadapter.NewVLLMAdapter())
 
 	sm := kvevents.NewSubscriberManager(pool)
 
@@ -75,7 +75,7 @@ func TestSubscriberManager_RemoveSubscriber(t *testing.T) {
 	poolConfig := kvevents.DefaultConfig()
 	tokenProcessor, err := kvblock.NewChunkedTokenDatabase(kvblock.DefaultTokenProcessorConfig())
 	require.NoError(t, err)
-	pool := kvevents.NewPool(poolConfig, index, tokenProcessor, engineadapter.NewVLLMAdapter(), engineadapter.KeyFromVLLMTopic)
+	pool := kvevents.NewPool(poolConfig, index, tokenProcessor, engineadapter.NewVLLMAdapter())
 
 	sm := kvevents.NewSubscriberManager(pool)
 
@@ -106,7 +106,7 @@ func TestSubscriberManager_MultipleSubscribers(t *testing.T) {
 	poolConfig := kvevents.DefaultConfig()
 	tokenProcessor, err := kvblock.NewChunkedTokenDatabase(kvblock.DefaultTokenProcessorConfig())
 	require.NoError(t, err)
-	pool := kvevents.NewPool(poolConfig, index, tokenProcessor, engineadapter.NewVLLMAdapter(), engineadapter.KeyFromVLLMTopic)
+	pool := kvevents.NewPool(poolConfig, index, tokenProcessor, engineadapter.NewVLLMAdapter())
 
 	sm := kvevents.NewSubscriberManager(pool)
 
@@ -154,7 +154,7 @@ func TestSubscriberManager_EndpointChange(t *testing.T) {
 	poolConfig := kvevents.DefaultConfig()
 	tokenProcessor, err := kvblock.NewChunkedTokenDatabase(kvblock.DefaultTokenProcessorConfig())
 	require.NoError(t, err)
-	pool := kvevents.NewPool(poolConfig, index, tokenProcessor, engineadapter.NewVLLMAdapter(), engineadapter.KeyFromVLLMTopic)
+	pool := kvevents.NewPool(poolConfig, index, tokenProcessor, engineadapter.NewVLLMAdapter())
 
 	sm := kvevents.NewSubscriberManager(pool)
 
@@ -191,7 +191,7 @@ func TestSubscriberManager_ConcurrentOperations(t *testing.T) {
 	poolConfig := kvevents.DefaultConfig()
 	tokenProcessor, err := kvblock.NewChunkedTokenDatabase(kvblock.DefaultTokenProcessorConfig())
 	require.NoError(t, err)
-	pool := kvevents.NewPool(poolConfig, index, tokenProcessor, engineadapter.NewVLLMAdapter(), engineadapter.KeyFromVLLMTopic)
+	pool := kvevents.NewPool(poolConfig, index, tokenProcessor, engineadapter.NewVLLMAdapter())
 
 	sm := kvevents.NewSubscriberManager(pool)
 

@@ -111,10 +111,10 @@ func SetupEventsPool(ctx context.Context, kvBlockIndex kvblock.Index) (*kvevents
 
 	tokenProcessor, err := kvblock.NewChunkedTokenDatabase(kvblock.DefaultTokenProcessorConfig())
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to create token processor: %w", err)
 	}
 
-	pool := kvevents.NewPool(cfg, kvBlockIndex, tokenProcessor, engineadapter.NewVLLMAdapter(), engineadapter.KeyFromVLLMTopic)
+	pool := kvevents.NewPool(cfg, kvBlockIndex, tokenProcessor, engineadapter.NewVLLMAdapter())
 
 	return pool, nil
 }
