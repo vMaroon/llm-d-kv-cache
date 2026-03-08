@@ -65,6 +65,8 @@ func (v *VLLMAdapter) ShardingKey(msg *kvevents.RawMessage) string {
 // ParseMessage parses a raw transport message into domain data.
 // It extracts pod identity and model name from the topic,
 // and decodes the msgpack payload into an EventBatch.
+//
+//nolint:gocritic // unnamedResult: named returns conflict with nonamedreturns linter
 func (v *VLLMAdapter) ParseMessage(msg *kvevents.RawMessage) (string, string, kvevents.EventBatch, error) {
 	// Extract pod ID and model name from topic
 	podID, modelName := parseVLLMTopic(msg.Topic)
@@ -153,6 +155,8 @@ type msgpackVLLMAllBlocksClearedEvent struct {
 
 // parseVLLMTopic extracts pod ID and model name from vLLM topic format.
 // Expected format: "kv@<pod-id>@<model-name>".
+//
+//nolint:gocritic // unnamedResult: named returns conflict with nonamedreturns linter
 func parseVLLMTopic(topic string) (string, string) {
 	topicParts := strings.Split(topic, "@")
 	if len(topicParts) == 3 {
@@ -162,7 +166,7 @@ func parseVLLMTopic(topic string) (string, string) {
 }
 
 // decodeVLLMEvent decodes a single vLLM event using msgpack and converts it to a generic event.
-func (v *VLLMAdapter) decodeVLLMEvent(rawEventBytes []byte) (event kvevents.GenericEvent, err error) {
+func (v *VLLMAdapter) decodeVLLMEvent(rawEventBytes []byte) (kvevents.GenericEvent, error) {
 	// First decode to extract just the tag
 	var taggedUnion []any
 	if err := msgpack.Unmarshal(rawEventBytes, &taggedUnion); err != nil {

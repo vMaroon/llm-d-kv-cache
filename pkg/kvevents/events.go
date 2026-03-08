@@ -19,11 +19,11 @@ type EventType string
 
 const (
 	// EventTypeBlockStored indicates blocks were added to cache.
-	EventTypeBlockStored EventType = "block_stored"
+	EventTypeBlockStored EventType = "BlockStored"
 	// EventTypeBlockRemoved indicates blocks were evicted from cache.
-	EventTypeBlockRemoved EventType = "block_removed"
+	EventTypeBlockRemoved EventType = "BlockRemoved"
 	// EventTypeAllBlocksCleared indicates entire cache was cleared.
-	EventTypeAllBlocksCleared EventType = "all_blocks_cleared"
+	EventTypeAllBlocksCleared EventType = "AllBlocksCleared"
 )
 
 // GenericEvent represents a KV-cache event containing already-parsed data.
