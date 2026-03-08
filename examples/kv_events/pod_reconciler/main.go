@@ -30,6 +30,7 @@ import (
 
 	"github.com/llm-d/llm-d-kv-cache/pkg/kvcache/kvblock"
 	"github.com/llm-d/llm-d-kv-cache/pkg/kvevents"
+	"github.com/llm-d/llm-d-kv-cache/pkg/kvevents/engineadapter"
 )
 
 func main() {
@@ -86,7 +87,7 @@ func run(ctx context.Context) error {
 		logger.Error(err, "failed to create token processor")
 		return err
 	}
-	pool := kvevents.NewPool(poolConfig, index, tokenProcessor)
+	pool := kvevents.NewPool(poolConfig, index, tokenProcessor, engineadapter.NewVLLMAdapter(), engineadapter.KeyFromVLLMTopic)
 	pool.Start(ctx)
 
 	// Create subscriber manager
