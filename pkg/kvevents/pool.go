@@ -245,7 +245,12 @@ func (p *Pool) processEventBatch(ctx context.Context, batch *EventBatch, podIden
 				parentRequestKey = key
 			}
 
-			requestKeys := p.tokenProcessor.TokensToKVBlockKeys(parentRequestKey, ev.Tokens, effectiveModelName)
+			requestKeys, err := p.tokenProcessor.TokensToKVBlockKeys(parentRequestKey, ev.Tokens, effectiveModelName, ev.ExtraKeys)
+			if err != nil {
+				debugLogger.Error(err, "Failed to generate request keys",
+					"parentRequestKey", parentRequestKey, "effectiveModelName", effectiveModelName, "extraKeys", ev.ExtraKeys)
+				continue
+			}
 
 			// Only proceed if we have valid keys to add.
 			if len(engineKeys) > 0 {

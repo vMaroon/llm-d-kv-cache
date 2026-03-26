@@ -14,6 +14,8 @@
 
 package kvevents
 
+import "github.com/llm-d/llm-d-kv-cache/pkg/kvcache/kvblock"
+
 // EventType represents the type of KV-cache event.
 type EventType string
 
@@ -71,7 +73,7 @@ type BlockStoredEvent struct {
 	DeviceTier  string
 	LoraID      *int
 	LoraName    *string
-	ExtraKeys   [][]any
+	ExtraKeys   []*kvblock.ExtraKeys
 }
 
 // Type returns the event type.

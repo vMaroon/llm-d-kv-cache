@@ -19,10 +19,12 @@ package engineadapter
 import (
 	"encoding/binary"
 	"fmt"
+	"math"
 	"strings"
 
 	"github.com/vmihailenco/msgpack/v5"
 
+	"github.com/llm-d/llm-d-kv-cache/pkg/kvcache/kvblock"
 	"github.com/llm-d/llm-d-kv-cache/pkg/kvevents"
 )
 
@@ -92,6 +94,32 @@ func (v *VLLMAdapter) ParseMessage(msg *kvevents.RawMessage) (string, string, kv
 	return podID, modelName, batch, nil
 }
 
+func (v *VLLMAdapter) getAsInt64(raw any) (int64, error) {
+	switch val := raw.(type) {
+	case int8:
+		return int64(val), nil
+	case int16:
+		return int64(val), nil
+	case int32:
+		return int64(val), nil
+	case int64:
+		return val, nil
+	case uint8:
+		return int64(val), nil
+	case uint16:
+		return int64(val), nil
+	case uint32:
+		return int64(val), nil
+	case uint64:
+		if val > math.MaxInt64 {
+			return 0, fmt.Errorf("uint64 value %d overflows int64", val)
+		}
+		return int64(val), nil
+	default:
+		return 0, fmt.Errorf("unsupported int type: %T", val)
+	}
+}
+
 // getHashAsUint64 converts vLLM hash formats (uint64 or []byte) to uint64.
 // This handles both legacy uint64 hashes and new []byte hashes by taking
 // the last 8 bytes and interpreting them as a big-endian integer.
@@ -137,7 +165,7 @@ type msgpackVLLMBlockStoredEvent struct {
 	LoraID          *int    `msgpack:",omitempty"`
 	Medium          *string `msgpack:",omitempty"`
 	LoraName        *string `msgpack:",omitempty"`
-	ExtraKeys       []any   `msgpack:",omitempty"`
+	ExtraKeys       [][]any   `msgpack:",omitempty"`
 }
 
 type msgpackVLLMBlockRemovedEvent struct {
@@ -219,17 +247,41 @@ func (v *VLLMAdapter) convertBlockStoredEvent(rawEventBytes []byte) (kvevents.Ge
 	}
 
 	// Convert extra_keys if present
-	var extraKeys [][]any
+	var extraKeys []*kvblock.ExtraKeys
 	if vllmEvent.ExtraKeys != nil {
-		extraKeys = make([][]any, 0, len(vllmEvent.ExtraKeys))
-		for i, rawKey := range vllmEvent.ExtraKeys {
-			if rawKey == nil {
-				extraKeys = append(extraKeys, nil)
-			} else if keySlice, ok := rawKey.([]any); ok {
-				extraKeys = append(extraKeys, keySlice)
-			} else {
-				return nil, fmt.Errorf("extra_keys[%d] has invalid type %T, expected []any or nil", i, rawKey)
+		extraKeys = make([]*kvblock.ExtraKeys, len(vllmEvent.ExtraKeys))
+		for i, rawBlockEKs := range vllmEvent.ExtraKeys {
+			if rawBlockEKs == nil {
+				extraKeys[i] = nil
+				continue
 			}
+			extraKey := &kvblock.ExtraKeys{
+				MultiModal: []kvblock.ExtraKeyMultiModal{},
+			}
+			for j, rawEK := range rawBlockEKs {
+				switch rawEKType := rawEK.(type) {
+				case []any:
+					// multimodal extra keys are encoded as a 2-element array: [hash string, offset int]
+					if len(rawEKType) == 2 {
+						hash, ok := rawEKType[0].(string);
+						if !ok {
+							return nil, fmt.Errorf("extra_keys[%d][%d][0] is not a string", i, j)
+						}
+
+						offset, err := v.getAsInt64(rawEKType[1])
+						if err != nil {
+							return nil, fmt.Errorf("failed to parse offset at extra_keys[%d][%d][1]: %w", i, j, err)
+						}
+
+						mmEK := kvblock.ExtraKeyMultiModal{
+							Hash:   hash,
+							Offset: offset,
+						}
+						extraKey.MultiModal = append(extraKey.MultiModal, mmEK)
+					}
+				}
+			}
+			extraKeys[i] = extraKey
 		}
 	}
 

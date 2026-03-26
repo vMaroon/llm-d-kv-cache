@@ -143,7 +143,12 @@ func (k *Indexer) ComputeBlockKeys(ctx context.Context, renderReq *types.RenderC
 	}
 
 	// 3. get block keys
-	blockKeys := k.tokenProcessor.TokensToKVBlockKeys(kvblock.EmptyBlockHash, tokens, modelName)
+	blockKeys, err := k.tokenProcessor.TokensToKVBlockKeys(kvblock.EmptyBlockHash, tokens, modelName, nil)
+	if err != nil {
+		traceLogger.Error(err, "blockKey conversion failed")
+		return nil, fmt.Errorf("blockKey conversion failed: %w", err)
+	}
+
 	if len(blockKeys) == 0 {
 		traceLogger.Info("no block keys found")
 		return nil, nil
@@ -197,7 +202,10 @@ func (k *Indexer) ScoreTokens(
 
 	traceLogger := log.FromContext(ctx).V(logging.TRACE).WithName("kvcache.ScoreTokens")
 
-	blockKeys := k.tokenProcessor.TokensToKVBlockKeys(kvblock.EmptyBlockHash, tokens, modelName)
+	blockKeys, err := k.tokenProcessor.TokensToKVBlockKeys(kvblock.EmptyBlockHash, tokens, modelName, nil)
+	if err != nil {
+		return nil, fmt.Errorf("blockKey conversion failed: %w", err)
+	}
 
 	span.SetAttributes(
 		attribute.String("gen_ai.request.model", modelName),

@@ -39,9 +39,9 @@ type mockTokenProcessor struct {
 	receivedTokens []uint32
 }
 
-func (m *mockTokenProcessor) TokensToKVBlockKeys(_ kvblock.BlockHash, tokens []uint32, _ string) []kvblock.BlockHash {
+func (m *mockTokenProcessor) TokensToKVBlockKeys(_ kvblock.BlockHash, tokens []uint32, _ string, _ []*kvblock.ExtraKeys) ([]kvblock.BlockHash, error) {
 	m.receivedTokens = tokens
-	return m.blockKeys
+	return m.blockKeys, nil
 }
 
 // mockTokenizersPool implements kvcache.TokenizersPool for testing.

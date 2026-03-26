@@ -18,8 +18,10 @@ package engineadapter //nolint:testpackage // Tests access unexported functions 
 
 import (
 	"encoding/binary"
+	"os"
 	"testing"
 
+	"github.com/llm-d/llm-d-kv-cache/pkg/kvcache/kvblock"
 	"github.com/llm-d/llm-d-kv-cache/pkg/kvevents"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -154,7 +156,9 @@ func TestDecodeVLLMEvent_BlockStoredWithLora(t *testing.T) {
 		42,
 		"gpu",
 		"test-lora",
-		[]any{[]any{"uuid-A", "salt"}, nil}, // extra_keys
+		// extra_keys with non-multimodal (LoRA) entries: block0 has string-pair entries,
+		// block1 is nil. Non-[]any entries are excluded from multimodal processing.
+		[]any{[]any{"uuid-A", "salt"}, nil},
 	}
 
 	rawBytes, err := msgpack.Marshal(vllmEvent)
@@ -174,8 +178,12 @@ func TestDecodeVLLMEvent_BlockStoredWithLora(t *testing.T) {
 	assert.Equal(t, 42, *blockStored.LoraID)
 	require.NotNil(t, blockStored.LoraName)
 	assert.Equal(t, "test-lora", *blockStored.LoraName)
-	require.NotNil(t, blockStored.ExtraKeys)
-	assert.Equal(t, [][]any{{"uuid-A", "salt"}, nil}, blockStored.ExtraKeys)
+	// LoRA extra_keys are non-[]any string pairs — excluded from multimodal processing.
+	// Block 0 produces a non-nil ExtraKeys with no multimodal entries; block 1 is nil.
+	require.Len(t, blockStored.ExtraKeys, 2)
+	require.NotNil(t, blockStored.ExtraKeys[0])
+	assert.Empty(t, blockStored.ExtraKeys[0].MultiModal)
+	assert.Nil(t, blockStored.ExtraKeys[1])
 }
 
 // TestDecodeVLLMEvent_BlockStoredMissingLoraName tests decoding with missing field.
@@ -221,7 +229,7 @@ func TestDecodeVLLMEvent_BlockStoredInvalidExtraKeys(t *testing.T) {
 
 	_, err = adapter.decodeVLLMEvent(rawBytes)
 	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "extra_keys[0] has invalid type")
+	assert.Contains(t, err.Error(), "failed to decode BlockStored event")
 }
 
 // TestDecodeVLLMEvent_BlockRemoved tests decoding a valid BlockRemoved event.
@@ -395,4 +403,102 @@ func TestGetHashAsUint64(t *testing.T) {
 		_, err := adapter.getHashAsUint64("not a hash")
 		assert.Error(t, err)
 	})
+}
+
+// TestParseMessage_BlockStoredMsgpackFile parses the real block_stored_example.msgpack
+// fixture captured from a live vLLM multi-modal inference (Qwen/Qwen2-VL-2B-Instruct) using a
+// two-image prompt. It asserts that:
+//   - top-level fields are decoded correctly
+//   - null extra_keys entries are nil (not an empty struct)
+//   - non-null entries carry the correct per-image hash and offset
+//
+// Layout of the 117 blocks (block_size=16):
+//
+//	blocks  0–60  : image 1 (Poker Game 1894), offsets  15 → -945 (step -16)
+//	block  61     : nil  (text between the two images)
+//	blocks 62–115 : image 2 (A Friend in Need 1903), offsets 2 → -846 (step -16)
+//	block 116     : nil  (closing comparison prompt text)
+func TestParseMessage_BlockStoredMsgpackFile(t *testing.T) {
+	payload, err := os.ReadFile("../../../examples/testdata/block_stored_example.msgpack")
+	require.NoError(t, err)
+
+	adapter := NewVLLMAdapter()
+	_, _, batch, err := adapter.ParseMessage(&kvevents.RawMessage{
+		Topic:   "kv@pod-1@Qwen/Qwen2-VL-2B-Instruct",
+		Payload: payload,
+	})
+	require.NoError(t, err)
+	require.Len(t, batch.Events, 1)
+
+	ev, ok := batch.Events[0].(*kvevents.BlockStoredEvent)
+	require.True(t, ok)
+
+	// Top-level fields
+	assert.Len(t, ev.BlockHashes, 117)
+	assert.Len(t, ev.Tokens, 1872) // 117 blocks × 16 tokens
+	assert.Equal(t, uint64(0), ev.ParentHash)
+	assert.Equal(t, "GPU", ev.DeviceTier)
+	assert.Nil(t, ev.LoraID)
+	assert.Nil(t, ev.LoraName)
+
+	require.Len(t, ev.ExtraKeys, 117)
+
+	const (
+		image1Hash = "6ab3a7d0570817f1a4e9adaeda325c07c2466b252279a633ee2995cdba59ab25"
+		image2Hash = "e950785918bdef0f88ec349d3f65a2ed0b1d448c854333ea1e71bfedce1fe252"
+	)
+
+	// --- image 1: blocks 0–60 ---
+	// first block starts at offset 15; each successive block is 16 tokens later → offset -= 16
+	require.NotNil(t, ev.ExtraKeys[0])
+	assert.Equal(t, kvblock.ExtraKeyMultiModal{Hash: image1Hash, Offset: 15}, ev.ExtraKeys[0].MultiModal[0])
+
+	require.NotNil(t, ev.ExtraKeys[1])
+	assert.Equal(t, kvblock.ExtraKeyMultiModal{Hash: image1Hash, Offset: -1}, ev.ExtraKeys[1].MultiModal[0])
+
+	require.NotNil(t, ev.ExtraKeys[60])
+	assert.Equal(t, kvblock.ExtraKeyMultiModal{Hash: image1Hash, Offset: -945}, ev.ExtraKeys[60].MultiModal[0])
+
+	prevOffset := int64(15)
+	for i := 0; i <= 60; i++ {
+		require.NotNil(t, ev.ExtraKeys[i], "block %d should have image-1 extra_keys", i)
+		require.Len(t, ev.ExtraKeys[i].MultiModal, 1)
+		assert.Equal(t, image1Hash, ev.ExtraKeys[i].MultiModal[0].Hash,
+			"block %d should carry image-1 hash", i)
+		if i > 0 {
+			assert.Equal(t, prevOffset-16, ev.ExtraKeys[i].MultiModal[0].Offset,
+				"block %d offset should decrease by 16 from block %d", i, i-1)
+		}
+		prevOffset = ev.ExtraKeys[i].MultiModal[0].Offset
+	}
+
+	// --- text separator: block 61 ---
+	assert.Nil(t, ev.ExtraKeys[61], "block 61 is text-only, extra_keys must be nil")
+
+	// --- image 2: blocks 62–115 ---
+	// first block starts at offset 2; each successive block offset -= 16
+	require.NotNil(t, ev.ExtraKeys[62])
+	assert.Equal(t, kvblock.ExtraKeyMultiModal{Hash: image2Hash, Offset: 2}, ev.ExtraKeys[62].MultiModal[0])
+
+	require.NotNil(t, ev.ExtraKeys[63])
+	assert.Equal(t, kvblock.ExtraKeyMultiModal{Hash: image2Hash, Offset: -14}, ev.ExtraKeys[63].MultiModal[0])
+
+	require.NotNil(t, ev.ExtraKeys[115])
+	assert.Equal(t, kvblock.ExtraKeyMultiModal{Hash: image2Hash, Offset: -846}, ev.ExtraKeys[115].MultiModal[0])
+
+	prevOffset = int64(2)
+	for i := 62; i <= 115; i++ {
+		require.NotNil(t, ev.ExtraKeys[i], "block %d should have image-2 extra_keys", i)
+		require.Len(t, ev.ExtraKeys[i].MultiModal, 1)
+		assert.Equal(t, image2Hash, ev.ExtraKeys[i].MultiModal[0].Hash,
+			"block %d should carry image-2 hash", i)
+		if i > 62 {
+			assert.Equal(t, prevOffset-16, ev.ExtraKeys[i].MultiModal[0].Offset,
+				"block %d offset should decrease by 16 from block %d", i, i-1)
+		}
+		prevOffset = ev.ExtraKeys[i].MultiModal[0].Offset
+	}
+
+	// --- closing text: block 116 ---
+	assert.Nil(t, ev.ExtraKeys[116], "block 116 is text-only, extra_keys must be nil")
 }

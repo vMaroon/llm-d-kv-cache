@@ -104,10 +104,13 @@ func (s *KVCacheSuite) promptToEngineAndRequestKeys(
 	tokens []uint32,
 	model string,
 ) (engineKeys, requestKeys []kvblock.BlockHash) {
-	requestKeys = s.tokenProcessor.TokensToKVBlockKeys(kvblock.EmptyBlockHash, tokens, model)
+	var err error
+	requestKeys, err = s.tokenProcessor.TokensToKVBlockKeys(kvblock.EmptyBlockHash, tokens, model, nil)
+	s.Require().NoError(err)
 	s.Require().NotEmpty(requestKeys)
 
-	engineKeys = s.tokenProcessor.TokensToKVBlockKeys(kvblock.BlockHash(1), tokens, model)
+	engineKeys, err = s.tokenProcessor.TokensToKVBlockKeys(kvblock.BlockHash(1), tokens, model, nil)
+	s.Require().NoError(err)
 	s.Require().NotEmpty(engineKeys)
 
 	return engineKeys, requestKeys

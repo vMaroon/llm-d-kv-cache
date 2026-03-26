@@ -84,11 +84,15 @@ func TestGetInitHash_ConsistentHashesForSameModel(t *testing.T) {
 
 	modelName := "test-model"
 	tokens := []uint32{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16} // Full block
+	extraKeys := []*kvblock.ExtraKeys{nil}                                       // one nil entry per block
 
 	// Get keys multiple times with no parent (should use init hash)
-	keys1 := processor.TokensToKVBlockKeys(kvblock.EmptyBlockHash, tokens, modelName)
-	keys2 := processor.TokensToKVBlockKeys(kvblock.EmptyBlockHash, tokens, modelName)
-	keys3 := processor.TokensToKVBlockKeys(kvblock.EmptyBlockHash, tokens, modelName)
+	keys1, err := processor.TokensToKVBlockKeys(kvblock.EmptyBlockHash, tokens, modelName, extraKeys)
+	require.NoError(t, err)
+	keys2, err := processor.TokensToKVBlockKeys(kvblock.EmptyBlockHash, tokens, modelName, extraKeys)
+	require.NoError(t, err)
+	keys3, err := processor.TokensToKVBlockKeys(kvblock.EmptyBlockHash, tokens, modelName, extraKeys)
+	require.NoError(t, err)
 
 	require.NotEmpty(t, keys1, "Should generate keys")
 	require.NotEmpty(t, keys2, "Should generate keys")
@@ -122,10 +126,12 @@ func TestGetInitHash_DifferentHashesForDifferentModels(t *testing.T) {
 
 	tokens := []uint32{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16} // Full block
 	hashes := make(map[string]uint64)
+	extraKeys := []*kvblock.ExtraKeys{nil}
 
 	// Get first key hash for each model (derived from init hash)
 	for _, modelName := range models {
-		keys := processor.TokensToKVBlockKeys(kvblock.EmptyBlockHash, tokens, modelName)
+		keys, err := processor.TokensToKVBlockKeys(kvblock.EmptyBlockHash, tokens, modelName, extraKeys)
+		require.NoError(t, err)
 		require.NotEmpty(t, keys, "Should generate keys for model: %s", modelName)
 
 		hashes[modelName] = uint64(keys[0])
@@ -146,6 +152,7 @@ func TestGetInitHash_DifferentHashesForDifferentModels(t *testing.T) {
 func TestGetInitHash_DifferentSeedsProduceDifferentHashes(t *testing.T) {
 	modelName := "test-model"
 	tokens := []uint32{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16}
+	extraKeys := []*kvblock.ExtraKeys{nil}
 
 	// Test with different seeds
 	seeds := []string{
@@ -166,7 +173,8 @@ func TestGetInitHash_DifferentSeedsProduceDifferentHashes(t *testing.T) {
 
 		processor, err := kvblock.NewChunkedTokenDatabase(config)
 		require.NoError(t, err)
-		keys := processor.TokensToKVBlockKeys(kvblock.EmptyBlockHash, tokens, modelName)
+		keys, err := processor.TokensToKVBlockKeys(kvblock.EmptyBlockHash, tokens, modelName, extraKeys)
+		require.NoError(t, err)
 		require.NotEmpty(t, keys, "Should generate keys for seed: %s", seed)
 
 		hashes[seed] = uint64(keys[0])
@@ -195,6 +203,7 @@ func TestGetInitHash_ConcurrentAccess(t *testing.T) {
 
 	modelName := "concurrent-test-model"
 	tokens := []uint32{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16}
+	extraKeys := []*kvblock.ExtraKeys{nil}
 	numGoroutines := 100
 
 	// Channel to collect results
@@ -206,8 +215,8 @@ func TestGetInitHash_ConcurrentAccess(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			keys := processor.TokensToKVBlockKeys(kvblock.EmptyBlockHash, tokens, modelName)
-			if len(keys) > 0 {
+			keys, err := processor.TokensToKVBlockKeys(kvblock.EmptyBlockHash, tokens, modelName, extraKeys)
+			if err == nil && len(keys) > 0 {
 				results <- uint64(keys[0])
 			}
 		}()
@@ -238,6 +247,7 @@ func TestGetInitHash_Deterministic(t *testing.T) {
 	modelName := "deterministic-test"
 	seed := "deterministic-seed"
 	tokens := []uint32{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16}
+	extraKeys := []*kvblock.ExtraKeys{nil}
 
 	var hashes []uint64
 
@@ -250,7 +260,8 @@ func TestGetInitHash_Deterministic(t *testing.T) {
 
 		processor, err := kvblock.NewChunkedTokenDatabase(config)
 		require.NoError(t, err)
-		keys := processor.TokensToKVBlockKeys(kvblock.EmptyBlockHash, tokens, modelName)
+		keys, err := processor.TokensToKVBlockKeys(kvblock.EmptyBlockHash, tokens, modelName, extraKeys)
+		require.NoError(t, err)
 		require.NotEmpty(t, keys, "Should generate keys for instance %d", i)
 
 		hashes = append(hashes, uint64(keys[0]))
@@ -524,5 +535,156 @@ func TestHash_ExtraTypeSupport(t *testing.T) {
 				assert.NotEmpty(t, bytes, "Encoded bytes should not be empty")
 			}
 		})
+	}
+}
+
+func TestTokensToKVBlockKeys_ExtraKeysAffectHash(t *testing.T) {
+	config := &kvblock.TokenProcessorConfig{
+		BlockSize: 16,
+		HashSeed:  "test-seed",
+	}
+
+	processor, err := kvblock.NewChunkedTokenDatabase(config)
+	require.NoError(t, err)
+
+	modelName := "test-model"
+	tokens := []uint32{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16} // full block
+
+	// nil extra key (no multi-modal content)
+	nilExtraKeys := []*kvblock.ExtraKeys{nil}
+	keysNil, err := processor.TokensToKVBlockKeys(kvblock.EmptyBlockHash, tokens, modelName, nilExtraKeys)
+	require.NoError(t, err)
+	require.Len(t, keysNil, 1)
+
+	// non-nil extra key with multi-modal content
+	withExtraKeys := []*kvblock.ExtraKeys{
+		{MultiModal: []kvblock.ExtraKeyMultiModal{{Hash: "abc123", Offset: 0}}},
+	}
+	keysExtra, err := processor.TokensToKVBlockKeys(kvblock.EmptyBlockHash, tokens, modelName, withExtraKeys)
+	require.NoError(t, err)
+	require.Len(t, keysExtra, 1)
+
+	// different extra keys should produce different hashes
+	assert.NotEqual(t, keysNil[0], keysExtra[0], "extra keys should affect the resulting hash")
+
+	// same extra keys should produce the same hash (deterministic)
+	keysExtra2, err := processor.TokensToKVBlockKeys(kvblock.EmptyBlockHash, tokens, modelName, withExtraKeys)
+	require.NoError(t, err)
+	assert.Equal(t, keysExtra[0], keysExtra2[0], "same extra keys should produce the same hash")
+}
+
+func TestTokensToKVBlockKeys_ExtraKeysMismatchReturnsError(t *testing.T) {
+	config := &kvblock.TokenProcessorConfig{
+		BlockSize: 16,
+		HashSeed:  "test-seed",
+	}
+
+	processor, err := kvblock.NewChunkedTokenDatabase(config)
+	require.NoError(t, err)
+
+	modelName := "test-model"
+	// two full blocks → 2 chunks
+	tokens := make([]uint32, 32)
+	for i := range tokens {
+		tokens[i] = uint32(i + 1)
+	}
+
+	// extraKeys length (1) does not match chunks length (2) — should error
+	mismatchedExtraKeys := []*kvblock.ExtraKeys{nil}
+	keys, err := processor.TokensToKVBlockKeys(kvblock.EmptyBlockHash, tokens, modelName, mismatchedExtraKeys)
+	require.Error(t, err, "mismatched extraKeys length should return an error")
+	assert.Contains(t, err.Error(), "does not match token chunk count")
+	assert.Nil(t, keys)
+}
+
+// TestTokensToKVBlockKeys_MixedNilAndMultiModalExtraKeys mirrors real vLLM BlockStored events
+// where initial text blocks carry nil extra_keys and later image blocks carry multi-modal extra_keys.
+// The real format per block: [(['image_hash', offset],)] — one entry per image region in the block.
+func TestTokensToKVBlockKeys_MixedNilAndMultiModalExtraKeys(t *testing.T) {
+	config := &kvblock.TokenProcessorConfig{
+		BlockSize: 16,
+		HashSeed:  "",
+	}
+
+	processor, err := kvblock.NewChunkedTokenDatabase(config)
+	require.NoError(t, err)
+
+	modelName := "Qwen/Qwen2.5-VL-7B-Instruct"
+
+	// 4 blocks: 2 pure-text (nil), 2 multi-modal (same image hash, offsets 3 and -13).
+	// Offset pattern matches real data: first occurrence is positive (3),
+	// subsequent occurrences decrease by block-size (3 - 16 = -13).
+	const imageHash = "6ab3a7d0570817f1a4e9adaeda325c07c2466b252279a633ee2995cdba59ab25"
+	tokens := make([]uint32, 64) // 4 × 16 tokens
+	for i := range tokens {
+		tokens[i] = uint32(i + 1)
+	}
+
+	extraKeys := []*kvblock.ExtraKeys{
+		nil, // block 0: text only
+		nil, // block 1: text only
+		{MultiModal: []kvblock.ExtraKeyMultiModal{{Hash: imageHash, Offset: 3}}},   // block 2: first image region
+		{MultiModal: []kvblock.ExtraKeyMultiModal{{Hash: imageHash, Offset: -13}}}, // block 3: second image region
+	}
+
+	keys, err := processor.TokensToKVBlockKeys(kvblock.EmptyBlockHash, tokens, modelName, extraKeys)
+	require.NoError(t, err)
+	require.Len(t, keys, 4)
+
+	// All four block hashes must be distinct (prefix chain + extra_keys both contribute).
+	seen := make(map[kvblock.BlockHash]int)
+	for i, k := range keys {
+		if prev, exists := seen[k]; exists {
+			t.Errorf("blocks %d and %d produced the same hash %d", prev, i, k)
+		}
+		seen[k] = i
+	}
+
+	// The two multi-modal blocks (same image hash, different offsets) must differ.
+	assert.NotEqual(t, keys[2], keys[3],
+		"blocks with same image hash but different offsets must produce different hashes")
+
+	// Determinism: same inputs must always yield the same output.
+	keys2, err := processor.TokensToKVBlockKeys(kvblock.EmptyBlockHash, tokens, modelName, extraKeys)
+	require.NoError(t, err)
+	assert.Equal(t, keys, keys2, "TokensToKVBlockKeys must be deterministic")
+}
+
+// TestTokensToKVBlockKeys_SameImageHashDifferentOffsetsDiffer checks that two otherwise-identical
+// blocks whose only difference is the multi-modal offset produce distinct hashes.
+// In real vLLM events the offset decreases by block_size for each successive image block:
+// first block offset=3, next offset=-13 (= 3 - 16), then -29, etc.
+func TestTokensToKVBlockKeys_SameImageHashDifferentOffsetsDiffer(t *testing.T) {
+	config := &kvblock.TokenProcessorConfig{
+		BlockSize: 16,
+		HashSeed:  "",
+	}
+
+	processor, err := kvblock.NewChunkedTokenDatabase(config)
+	require.NoError(t, err)
+
+	modelName := "Qwen/Qwen2.5-VL-7B-Instruct"
+	const imageHash = "6ab3a7d0570817f1a4e9adaeda325c07c2466b252279a633ee2995cdba59ab25"
+	tokens := []uint32{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16}
+
+	offsets := []int64{3, -13, -29, -45, -61}
+	hashes := make([]kvblock.BlockHash, len(offsets))
+	for i, offset := range offsets {
+		ek := []*kvblock.ExtraKeys{
+			{MultiModal: []kvblock.ExtraKeyMultiModal{{Hash: imageHash, Offset: offset}}},
+		}
+		keys, err := processor.TokensToKVBlockKeys(kvblock.EmptyBlockHash, tokens, modelName, ek)
+		require.NoError(t, err)
+		require.Len(t, keys, 1)
+		hashes[i] = keys[0]
+	}
+
+	seen := make(map[kvblock.BlockHash]int64)
+	for i, h := range hashes {
+		if prevOffset, exists := seen[h]; exists {
+			t.Errorf("offsets %d and %d produced the same block hash — offset must be part of the hash input",
+				prevOffset, offsets[i])
+		}
+		seen[h] = offsets[i]
 	}
 }
