@@ -46,6 +46,18 @@ func (m *mockTokenProcessor) TokensToKVBlockKeys(
 	return m.blockKeys, nil
 }
 
+// TokensToKVBlockHashBytes is required by the TokenProcessor interface.
+// The mock isn't exercised on the bytes path; return zero-valued digests
+// matching the truncated keys count so callers that happen to use it don't
+// blow up.
+func (m *mockTokenProcessor) TokensToKVBlockHashBytes(
+	_ kvblock.BlockHashBytes, tokens []uint32, _ string, _ []*kvblock.BlockExtraFeatures,
+) ([]kvblock.BlockHashBytes, error) {
+	m.receivedTokens = tokens
+	out := make([]kvblock.BlockHashBytes, len(m.blockKeys))
+	return out, nil
+}
+
 func (m *mockTokenProcessor) BlockSize() int {
 	return 16
 }

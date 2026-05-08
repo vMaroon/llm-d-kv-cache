@@ -178,6 +178,86 @@ func TestVLLMParity_StructuredExtras(t *testing.T) {
 	}
 }
 
+// TestVLLMParity_BlockHashBytes verifies the bytes-mode (full 32-byte digest)
+// path matches vLLM's sha256_cbor output exactly — i.e. what vLLM publishes
+// when VLLM_KV_EVENTS_USE_INT_BLOCK_HASHES=0.
+func TestVLLMParity_BlockHashBytes(t *testing.T) {
+	for _, fx := range loadVLLMFixtures(t) {
+		t.Run(fx.Name, func(t *testing.T) {
+			proc, err := kvblock.NewChunkedTokenDatabase(&kvblock.TokenProcessorConfig{
+				BlockSize: fx.BlockSize,
+				HashSeed:  fx.Seed,
+			})
+			require.NoError(t, err)
+
+			var extras []*kvblock.BlockExtraFeatures
+			if fx.Extras != nil {
+				extras, err = kvblock.ParseRawExtraKeys(fx.Extras)
+				require.NoError(t, err)
+			}
+
+			got, err := proc.TokensToKVBlockHashBytes(
+				kvblock.EmptyBlockHashBytes, fx.Tokens, "ignored", extras,
+			)
+			require.NoError(t, err)
+			require.Len(t, got, len(fx.DigestsHex))
+
+			for i, wantHex := range fx.DigestsHex {
+				require.Equalf(t, wantHex, hex.EncodeToString(got[i][:]),
+					"%s block %d full digest mismatch", fx.Name, i)
+			}
+
+			// Truncated form (uint64) must agree with the bytes form.
+			for i, want := range fx.Truncated {
+				require.Equalf(t, want, uint64(got[i].Truncate()),
+					"%s block %d truncated mismatch", fx.Name, i)
+			}
+		})
+	}
+}
+
+// TestVLLMParity_BlockHashBytes_ChainedResume verifies that bytes-mode
+// chaining from a non-empty parent is exact: split each multi-block fixture
+// at every prefix boundary, replay the suffix from the parent digest, and
+// require the suffix digests match the originals. This is the property the
+// truncated-uint64 path cannot offer.
+func TestVLLMParity_BlockHashBytes_ChainedResume(t *testing.T) {
+	for _, fx := range loadVLLMFixtures(t) {
+		if len(fx.DigestsHex) < 2 || fx.Extras != nil {
+			// Need ≥2 blocks; skip extras fixtures since per-block extras
+			// would also need slicing.
+			continue
+		}
+		t.Run(fx.Name, func(t *testing.T) {
+			proc, err := kvblock.NewChunkedTokenDatabase(&kvblock.TokenProcessorConfig{
+				BlockSize: fx.BlockSize,
+				HashSeed:  fx.Seed,
+			})
+			require.NoError(t, err)
+
+			full, err := proc.TokensToKVBlockHashBytes(
+				kvblock.EmptyBlockHashBytes, fx.Tokens, "model", nil,
+			)
+			require.NoError(t, err)
+			require.Len(t, full, len(fx.DigestsHex))
+
+			for k := 1; k < len(full); k++ {
+				// Resume after k blocks have already been hashed.
+				parent := full[k-1]
+				suffixTokens := fx.Tokens[k*fx.BlockSize:]
+				suffix, err := proc.TokensToKVBlockHashBytes(parent, suffixTokens, "model", nil)
+				require.NoErrorf(t, err, "split at k=%d", k)
+				require.Lenf(t, suffix, len(full)-k, "split at k=%d", k)
+				for i := range suffix {
+					require.Equalf(t, full[k+i], suffix[i],
+						"split at k=%d, suffix block %d should match original block %d",
+						k, i, k+i)
+				}
+			}
+		})
+	}
+}
+
 // TestVLLMParity_NilVsEmptyExtras documents the asymmetry between "no extras
 // for this block" (CBOR null) and "empty extras list" (CBOR []), which would
 // produce different hashes if confused. Our cborExtras() helper folds both

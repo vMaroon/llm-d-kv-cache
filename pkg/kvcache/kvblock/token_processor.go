@@ -36,6 +36,30 @@ const defaultBlockSize = 16
 // parent digest used during block hashing.
 const noneHashLen = sha256.Size
 
+// BlockHashBytes is the full 32-byte SHA-256 digest of a block, matching the
+// raw form vLLM publishes when VLLM_KV_EVENTS_USE_INT_BLOCK_HASHES=0 and the
+// chain input it uses internally regardless of the publish mode.
+type BlockHashBytes [noneHashLen]byte
+
+// EmptyBlockHashBytes is the all-zero parent that signals "start the chain
+// from NONE_HASH" (i.e. tokens[0:block_size] is the first block of the
+// request). Use this when you have the full prompt and want to reproduce vLLM
+// from scratch; pass any other value to resume from a known prior digest.
+var EmptyBlockHashBytes = BlockHashBytes{}
+
+// IsEmpty reports whether b is the zero value (i.e. "start from NONE_HASH").
+func (b BlockHashBytes) IsEmpty() bool { return b == EmptyBlockHashBytes }
+
+// Truncate maps a 32-byte digest to vLLM's 64-bit publish form
+// (VLLM_KV_EVENTS_USE_INT_BLOCK_HASHES=1):
+//
+//	uint64 = int.from_bytes(digest, "big") & ((1 << 64) - 1)
+//
+// equivalently the big-endian uint64 read from digest[24:32].
+func (b BlockHashBytes) Truncate() BlockHash {
+	return BlockHash(binary.BigEndian.Uint64(b[24:32]))
+}
+
 // TokenProcessorConfig holds the configuration for the token processor.
 type TokenProcessorConfig struct {
 	BlockSize int `json:"blockSize"`
@@ -61,17 +85,26 @@ func DefaultTokenProcessorConfig() *TokenProcessorConfig {
 //
 // Implementations must produce hashes that exactly match what vLLM publishes
 // in BlockStored events when configured with prefix_caching_hash_algo =
-// "sha256_cbor" and the default VLLM_KV_EVENTS_USE_INT_BLOCK_HASHES=1.
+// "sha256_cbor". Both publish modes are supported:
+//
+//   - VLLM_KV_EVENTS_USE_INT_BLOCK_HASHES=1 (default): events carry the
+//     truncated 64-bit form. Use TokensToKVBlockKeys, which returns BlockHash
+//     (uint64). Reproducing vLLM exactly requires parentKey=EmptyBlockHash and
+//     the full prompt — the truncated form has no inverse, so chained calls
+//     from a non-empty 64-bit parent are locally consistent but cannot match
+//     vLLM.
+//
+//   - VLLM_KV_EVENTS_USE_INT_BLOCK_HASHES=0: events carry the full 32-byte
+//     SHA-256 digest. Use TokensToKVBlockHashBytes, which accepts a 32-byte
+//     parent and returns 32-byte digests. Chained calls from any prior digest
+//     reproduce vLLM exactly.
 type TokenProcessor interface {
-	// TokensToKVBlockKeys converts tokens into block keys.
+	// TokensToKVBlockKeys converts tokens into truncated 64-bit block keys.
 	//
-	// parentKey is the truncated 64-bit hash of the block immediately preceding
-	// the first chunk in tokens, or EmptyBlockHash to start a fresh chain
-	// (i.e., the prompt begins at block 0). To reproduce vLLM-emitted hashes
-	// exactly, callers must pass the full prompt with EmptyBlockHash; chained
-	// computation from a non-Empty parentKey is locally consistent but does
-	// not match vLLM, because the chain input there is the full 32-byte SHA-256
-	// digest of the parent block, not the truncated 64-bit form.
+	// parentKey is the truncated 64-bit hash of the block immediately
+	// preceding the first chunk in tokens, or EmptyBlockHash to start a fresh
+	// chain (i.e., the prompt begins at block 0). To reproduce vLLM-emitted
+	// hashes exactly, pass the full prompt with EmptyBlockHash.
 	//
 	// modelName is accepted for API compatibility and ignored: vLLM does not
 	// mix the model name into block hashes.
@@ -84,6 +117,20 @@ type TokenProcessor interface {
 		parentKey BlockHash, tokens []uint32, modelName string,
 		extraFeatures []*BlockExtraFeatures,
 	) ([]BlockHash, error)
+
+	// TokensToKVBlockHashBytes converts tokens into full 32-byte block
+	// digests, matching vLLM's bytes publish mode.
+	//
+	// parent is the 32-byte digest of the block preceding the first chunk, or
+	// EmptyBlockHashBytes to start from NONE_HASH. Unlike the uint64 path,
+	// chained calls from a non-empty parent reproduce vLLM exactly because
+	// the digest IS the chain input.
+	//
+	// Other arguments behave identically to TokensToKVBlockKeys.
+	TokensToKVBlockHashBytes(
+		parent BlockHashBytes, tokens []uint32, modelName string,
+		extraFeatures []*BlockExtraFeatures,
+	) ([]BlockHashBytes, error)
 
 	// BlockSize returns the number of tokens per block used by this processor.
 	BlockSize() int
@@ -143,21 +190,13 @@ func NewChunkedTokenDatabase(config *TokenProcessorConfig) (TokenProcessor, erro
 // extra must already be vLLM-shaped: a flat []any of strings/[]byte/ints, or
 // nil for "no extras". A non-nil but empty []any is NOT equivalent to nil;
 // callers must pass nil when there are no extras.
-func (db *chunkedTokenDatabase) hashBlock(parent []byte, tokens []uint32, extra any) ([noneHashLen]byte, error) {
+func (db *chunkedTokenDatabase) hashBlock(parent []byte, tokens []uint32, extra any) (BlockHashBytes, error) {
 	payload := []any{parent, tokens, extra}
 	b, err := db.encoder.Marshal(payload)
 	if err != nil {
-		return [noneHashLen]byte{}, fmt.Errorf("CBOR marshal failed: %w", err)
+		return BlockHashBytes{}, fmt.Errorf("CBOR marshal failed: %w", err)
 	}
 	return sha256.Sum256(b), nil
-}
-
-// truncateDigest mirrors vLLM's maybe_convert_block_hash with
-// VLLM_KV_EVENTS_USE_INT_BLOCK_HASHES=1: low 64 bits of the big-endian
-// integer interpretation of the 32-byte digest, i.e. digest[24:32] read as
-// big-endian uint64.
-func truncateDigest(d [noneHashLen]byte) uint64 {
-	return binary.BigEndian.Uint64(d[24:32])
 }
 
 // expandUint64ToParent maps a truncated 64-bit parent key back to the 32-byte
@@ -165,9 +204,10 @@ func truncateDigest(d [noneHashLen]byte) uint64 {
 // this is a deterministic local extension and does NOT match vLLM's chain.
 //
 // We zero-pad the high 24 bytes and place the uint64 in the low 8 bytes
-// (big-endian). Used only when callers chain from a non-Empty parentKey.
-func expandUint64ToParent(v uint64) [noneHashLen]byte {
-	var buf [noneHashLen]byte
+// (big-endian). Used only when callers chain from a non-Empty parentKey on
+// the truncated uint64 path.
+func expandUint64ToParent(v uint64) BlockHashBytes {
+	var buf BlockHashBytes
 	binary.BigEndian.PutUint64(buf[24:32], v)
 	return buf
 }
@@ -191,11 +231,13 @@ func (db *chunkedTokenDatabase) BlockSize() int {
 	return db.TokenProcessorConfig.BlockSize
 }
 
-// TokensToKVBlockKeys converts tokens into block keys.
-func (db *chunkedTokenDatabase) TokensToKVBlockKeys(
-	parentKey BlockHash, tokens []uint32, _ string,
+// hashChain is the shared primitive behind both publish modes. It produces
+// the full 32-byte digest per block, chaining the digest as the parent for
+// the next block exactly as vLLM does. Caller picks the starting parent.
+func (db *chunkedTokenDatabase) hashChain(
+	parent BlockHashBytes, tokens []uint32,
 	extraFeatures []*BlockExtraFeatures,
-) ([]BlockHash, error) {
+) ([]BlockHashBytes, error) {
 	chunks := db.chunkTokens(tokens)
 	if len(chunks) == 0 {
 		return nil, nil
@@ -210,26 +252,56 @@ func (db *chunkedTokenDatabase) TokensToKVBlockKeys(
 			db.TokenProcessorConfig.BlockSize, len(tokens))
 	}
 
-	var parent [noneHashLen]byte
+	logger := log.FromContext(context.Background())
+
+	out := make([]BlockHashBytes, len(chunks))
+	cur := parent
+	for i, chunk := range chunks {
+		extra := extraFeatures[i].cborExtras()
+		digest, err := db.hashBlock(cur[:], chunk, extra)
+		if err != nil {
+			logger.Error(err, "failed to hash block", "blockIdx", i)
+			return nil, err
+		}
+		cur = digest
+		out[i] = digest
+	}
+	return out, nil
+}
+
+// TokensToKVBlockHashBytes is the bytes-mode entry point. parent may be
+// EmptyBlockHashBytes to start from NONE_HASH, or any prior digest to resume.
+func (db *chunkedTokenDatabase) TokensToKVBlockHashBytes(
+	parent BlockHashBytes, tokens []uint32, _ string,
+	extraFeatures []*BlockExtraFeatures,
+) ([]BlockHashBytes, error) {
+	if parent.IsEmpty() {
+		parent = db.noneHashFull
+	}
+	return db.hashChain(parent, tokens, extraFeatures)
+}
+
+// TokensToKVBlockKeys delegates to the bytes path and truncates each digest
+// to vLLM's 64-bit publish form. Chained computation from a non-Empty
+// parentKey uses a deterministic but non-vLLM-matching expansion of the
+// uint64 (see expandUint64ToParent); pass EmptyBlockHash + the full prompt
+// for true vLLM parity.
+func (db *chunkedTokenDatabase) TokensToKVBlockKeys(
+	parentKey BlockHash, tokens []uint32, _ string,
+	extraFeatures []*BlockExtraFeatures,
+) ([]BlockHash, error) {
+	var parent BlockHashBytes
 	if parentKey == EmptyBlockHash {
 		parent = db.noneHashFull
 	} else {
 		parent = expandUint64ToParent(uint64(parentKey))
 	}
 
-	logger := log.FromContext(context.Background())
-
-	out := make([]BlockHash, len(chunks))
-	for i, chunk := range chunks {
-		extra := extraFeatures[i].cborExtras()
-		digest, err := db.hashBlock(parent[:], chunk, extra)
-		if err != nil {
-			logger.Error(err, "failed to hash block", "blockIdx", i)
-			return nil, err
-		}
-		parent = digest
-		out[i] = BlockHash(truncateDigest(digest))
+	digests, err := db.hashChain(parent, tokens, extraFeatures)
+	if err != nil {
+		return nil, err
 	}
-
-	return utils.SliceMap(out, func(h BlockHash) BlockHash { return h }), nil
+	return utils.SliceMap(digests, func(d BlockHashBytes) BlockHash {
+		return d.Truncate()
+	}), nil
 }
