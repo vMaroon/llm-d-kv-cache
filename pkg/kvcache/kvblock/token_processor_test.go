@@ -103,7 +103,12 @@ func TestGetInitHash_ConsistentHashesForSameModel(t *testing.T) {
 	assert.NotEqual(t, keys1[0], kvblock.EmptyBlockHash, "Hash should not be zero")
 }
 
-func TestGetInitHash_DifferentHashesForDifferentModels(t *testing.T) {
+func TestGetInitHash_ModelNameIsIgnored(t *testing.T) {
+	// vLLM does not mix the model name into block hashes; the modelName
+	// argument to TokensToKVBlockKeys is accepted for API compatibility and
+	// must have no effect on the produced hashes. Cross-model isolation, if
+	// needed, must be achieved via a separate scoping mechanism (e.g. the
+	// indexer's pod/engine partitioning), not via the hash itself.
 	config := &kvblock.TokenProcessorConfig{
 		BlockSize: 16,
 		HashSeed:  "test-seed",
@@ -112,38 +117,29 @@ func TestGetInitHash_DifferentHashesForDifferentModels(t *testing.T) {
 	processor, err := kvblock.NewChunkedTokenDatabase(config)
 	require.NoError(t, err)
 
-	// Test different model names
+	tokens := []uint32{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16}
+
 	models := []string{
 		"gpt-4",
 		"llama-2-7b",
 		"claude-3",
-		"gemini-pro",
-		"",  // empty string
-		"a", // single character
+		"",
+		"a",
 		"very-long-model-name-with-special-characters-123!@#",
 	}
 
-	tokens := []uint32{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16} // Full block
-	hashes := make(map[string]uint64)
-
-	// Get first key hash for each model (derived from init hash)
-	for _, modelName := range models {
+	var first []kvblock.BlockHash
+	for i, modelName := range models {
 		keys, err := processor.TokensToKVBlockKeys(kvblock.EmptyBlockHash, tokens, modelName, nil)
 		require.NoError(t, err)
-		require.NotEmpty(t, keys, "Should generate keys for model: %s", modelName)
-
-		hashes[modelName] = uint64(keys[0])
-		assert.NotZero(t, hashes[modelName], "Hash should not be zero for model: %s", modelName)
-	}
-
-	// Verify all hashes are different
-	seenHashes := make(map[uint64]string)
-	for modelName, hash := range hashes {
-		if existingModel, exists := seenHashes[hash]; exists {
-			t.Errorf("Hash collision detected: models '%s' and '%s' have the same initial key hash %d",
-				modelName, existingModel, hash)
+		require.NotEmpty(t, keys, "model %q", modelName)
+		if i == 0 {
+			first = keys
+			continue
 		}
-		seenHashes[hash] = modelName
+		require.Equal(t, first, keys,
+			"hash for model %q must match the reference; modelName must not affect hashing",
+			modelName)
 	}
 }
 
