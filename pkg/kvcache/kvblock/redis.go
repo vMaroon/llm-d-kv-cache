@@ -423,34 +423,25 @@ func (r *RedisIndex) Clear(ctx context.Context, podIdentifier string) error {
 		}
 	}
 
-	removed := 0
 	const clearBatchSize = 1024
 	for start := 0; start < len(members); start += clearBatchSize {
 		end := min(start+clearBatchSize, len(members))
 		pipe := r.RedisClient.Pipeline()
-		results := make([]*redis.IntCmd, 0, end-start)
 		for _, member := range members[start:end] {
 			requestKey, field, ok := parseRedisPodEntryMember(member)
 			if !ok {
 				pipe.SRem(ctx, podEntriesKey, member)
 				continue
 			}
-			results = append(results, pipe.HDel(ctx, requestKey, field))
+			pipe.HDel(ctx, requestKey, field)
 			pipe.SRem(ctx, podEntriesKey, member)
 		}
 
-		if _, err := pipe.Exec(ctx); err != nil && !errors.Is(err, redis.Nil) {
+		if _, err := pipe.Exec(ctx); err != nil {
 			return fmt.Errorf("clear reverse-index pipeline failed: %w", err)
-		}
-		for _, result := range results {
-			n, err := result.Result()
-			if err != nil && !errors.Is(err, redis.Nil) {
-				return fmt.Errorf("clear reverse-index result failed: %w", err)
-			}
-			removed += int(n)
 		}
 	}
 
-	logger.Info("cleared pod from index", "pod", podIdentifier, "removed", removed, "scanned", len(members))
+	logger.Info("cleared pod from index", "pod", podIdentifier, "scanned", len(members))
 	return nil
 }
