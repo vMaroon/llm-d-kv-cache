@@ -49,6 +49,25 @@ BenchmarkRedisClearScaleReverseIndex/keys=8192/unrelated=8192/pods=8-24         
 BenchmarkRedisClearScaleReverseIndex/keys=32768/unrelated=32768/pods=8-24           3     329264781 ns/op      55362544 B/op    1280123 allocs/op
 ```
 
+## Lua Variant Check
+
+Before settling on the current no-Lua cleanup, I also tested a Clear-specific
+Lua variant that batched request hashes and reverse-index members into a script.
+The no-Lua implementation was faster in this `miniredis` benchmark while keeping
+the production code smaller. It also avoids Redis Cluster multi-key Lua script
+constraints for the Clear cleanup path.
+
+| request keys | Lua reverse index | no-Lua reverse index | no-Lua comparison |
+| ---: | ---: | ---: | ---: |
+| 512 | 4.52 ms/op | 2.75 ms/op | 1.64x faster |
+| 2,048 | 16.21 ms/op | 12.41 ms/op | 1.31x faster |
+| 8,192 | 57.72 ms/op | 55.61 ms/op | 1.04x faster |
+| 32,768 | 321.95 ms/op | 306.18 ms/op | 1.05x faster |
+
+The current implementation therefore keeps `Clear` as a pipelined `HDEL` +
+`SREM` cleanup over the pod-owned reverse-index set, instead of adding a
+Clear-specific Lua script.
+
 ## Redis Index Operations
 
 The operation benchmark measures the current Redis index implementation after
