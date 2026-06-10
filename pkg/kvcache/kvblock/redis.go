@@ -167,47 +167,6 @@ var pruneEngineKeyScript = redis.NewScript(`
 	return 1
 `)
 
-// clearPodEntryBatchScript atomically removes exact pod fields from request
-// hashes, prunes empty hashes, and removes the reverse-index entries.
-// KEYS[1] is the pod reverse-index set. KEYS[2..N] are request hashes.
-// For each request hash, ARGV contains: entry count, then alternating
-// reverse-index member and request hash field values.
-var clearPodEntryBatchScript = redis.NewScript(`
-	local arg_index = 1
-	local removed = 0
-	local members = {}
-
-	for key_index = 2, #KEYS do
-		local entry_count = tonumber(ARGV[arg_index])
-		arg_index = arg_index + 1
-
-		local fields = {}
-		for entry_index = 1, entry_count do
-			members[#members + 1] = ARGV[arg_index]
-			fields[#fields + 1] = ARGV[arg_index + 1]
-			arg_index = arg_index + 2
-		end
-
-		removed = removed + redis.call('HDEL', KEYS[key_index], unpack(fields))
-		if redis.call('HLEN', KEYS[key_index]) == 0 then
-			redis.call('DEL', KEYS[key_index])
-		end
-	end
-
-	redis.call('SREM', KEYS[1], unpack(members))
-	return removed
-`)
-
-type redisPodEntryClearArg struct {
-	member string
-	field  string
-}
-
-type redisPodEntryClearCommand struct {
-	requestKey string
-	entries    []redisPodEntryClearArg
-}
-
 // Lookup receives a list of keys and a set of pod identifiers,
 // and retrieves the filtered pods associated with those keys.
 // The filtering is done based on the pod identifiers provided.
@@ -463,65 +422,28 @@ func (r *RedisIndex) Clear(ctx context.Context, podIdentifier string) error {
 			break
 		}
 	}
-	if len(members) > 0 {
-		if err := clearPodEntryBatchScript.Load(ctx, r.RedisClient).Err(); err != nil {
-			return fmt.Errorf("load clear script failed: %w", err)
-		}
-	}
-
-	entriesByRequestKey := make(map[string][]redisPodEntryClearArg)
-	malformedMembers := make([]string, 0)
-	for _, member := range members {
-		requestKey, field, ok := parseRedisPodEntryMember(member)
-		if !ok {
-			malformedMembers = append(malformedMembers, member)
-			continue
-		}
-		entriesByRequestKey[requestKey] = append(entriesByRequestKey[requestKey], redisPodEntryClearArg{
-			member: member,
-			field:  field,
-		})
-	}
-
-	if len(malformedMembers) > 0 {
-		if err := r.RedisClient.SRem(ctx, podEntriesKey, stringSliceToAny(malformedMembers)...).Err(); err != nil {
-			return fmt.Errorf("remove malformed reverse-index entries failed: %w", err)
-		}
-	}
-
-	const clearChunkSize = 512
-	commands := make([]redisPodEntryClearCommand, 0, len(entriesByRequestKey))
-	for requestKey, entries := range entriesByRequestKey {
-		for start := 0; start < len(entries); start += clearChunkSize {
-			end := min(start+clearChunkSize, len(entries))
-			commands = append(commands, redisPodEntryClearCommand{
-				requestKey: requestKey,
-				entries:    entries[start:end],
-			})
-		}
-	}
 
 	removed := 0
-	const (
-		clearScriptRequestKeyLimit = 128
-		clearScriptEntryLimit      = 512
-		clearPipelineSize          = 64
-	)
-	for start := 0; start < len(commands); {
+	const clearBatchSize = 1024
+	for start := 0; start < len(members); start += clearBatchSize {
+		end := min(start+clearBatchSize, len(members))
 		pipe := r.RedisClient.Pipeline()
-		results := make([]*redis.Cmd, 0, clearPipelineSize)
-		for scripts := 0; scripts < clearPipelineSize && start < len(commands); scripts++ {
-			scriptEnd := redisPodEntryClearBatchEnd(commands, start, clearScriptRequestKeyLimit, clearScriptEntryLimit)
-			keys, args := redisPodEntryClearBatchArgs(podEntriesKey, commands[start:scriptEnd])
-			results = append(results, clearPodEntryBatchScript.EvalSha(ctx, pipe, keys, args...))
-			start = scriptEnd
+		results := make([]*redis.IntCmd, 0, end-start)
+		for _, member := range members[start:end] {
+			requestKey, field, ok := parseRedisPodEntryMember(member)
+			if !ok {
+				pipe.SRem(ctx, podEntriesKey, member)
+				continue
+			}
+			results = append(results, pipe.HDel(ctx, requestKey, field))
+			pipe.SRem(ctx, podEntriesKey, member)
 		}
 
 		if _, err := pipe.Exec(ctx); err != nil && !errors.Is(err, redis.Nil) {
 			return fmt.Errorf("clear reverse-index pipeline failed: %w", err)
 		}
 		for _, result := range results {
-			n, err := result.Int64()
+			n, err := result.Result()
 			if err != nil && !errors.Is(err, redis.Nil) {
 				return fmt.Errorf("clear reverse-index result failed: %w", err)
 			}
@@ -531,44 +453,4 @@ func (r *RedisIndex) Clear(ctx context.Context, podIdentifier string) error {
 
 	logger.Info("cleared pod from index", "pod", podIdentifier, "removed", removed, "scanned", len(members))
 	return nil
-}
-
-func redisPodEntryClearBatchEnd(commands []redisPodEntryClearCommand, start, keyLimit, entryLimit int) int {
-	entryCount := 0
-	for end := start; end < len(commands) && end-start < keyLimit; end++ {
-		nextEntryCount := entryCount + len(commands[end].entries)
-		if end > start && nextEntryCount > entryLimit {
-			return end
-		}
-		entryCount = nextEntryCount
-	}
-	return min(start+keyLimit, len(commands))
-}
-
-func redisPodEntryClearBatchArgs(podEntriesKey string, commands []redisPodEntryClearCommand) ([]string, []interface{}) {
-	keys := make([]string, 0, len(commands)+1)
-	keys = append(keys, podEntriesKey)
-
-	argCount := 0
-	for _, command := range commands {
-		argCount += 1 + len(command.entries)*2
-	}
-	args := make([]interface{}, 0, argCount)
-
-	for _, command := range commands {
-		keys = append(keys, command.requestKey)
-		args = append(args, len(command.entries))
-		for _, entry := range command.entries {
-			args = append(args, entry.member, entry.field)
-		}
-	}
-	return keys, args
-}
-
-func stringSliceToAny(values []string) []interface{} {
-	args := make([]interface{}, 0, len(values))
-	for _, value := range values {
-		args = append(args, value)
-	}
-	return args
 }
