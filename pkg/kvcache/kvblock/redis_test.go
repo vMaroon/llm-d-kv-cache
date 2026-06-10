@@ -124,28 +124,153 @@ func TestRedisClearDropsMalformedReverseEntries(t *testing.T) {
 }
 
 func BenchmarkRedisClearLegacyFullScan(b *testing.B) {
-	benchmarkRedisClear(b, false)
+	benchmarkRedisClear(b, redisClearBenchmarkCase{
+		name:           "keys=512/unrelated=512/pods=8",
+		keyCount:       512,
+		podCount:       8,
+		unrelatedCount: 512,
+	}, false)
 }
 
 func BenchmarkRedisClearReverseIndex(b *testing.B) {
-	benchmarkRedisClear(b, true)
+	benchmarkRedisClear(b, redisClearBenchmarkCase{
+		name:           "keys=512/unrelated=512/pods=8",
+		keyCount:       512,
+		podCount:       8,
+		unrelatedCount: 512,
+	}, true)
 }
 
-func benchmarkRedisClear(b *testing.B, reverseIndex bool) {
-	server, err := miniredis.Run()
-	require.NoError(b, err)
-	b.Cleanup(server.Close)
+func BenchmarkRedisClearScaleLegacyFullScan(b *testing.B) {
+	benchmarkRedisClearScale(b, false)
+}
 
-	index, err := NewRedisIndex(&RedisIndexConfig{Address: server.Addr()})
-	require.NoError(b, err)
-	redisIndex := index.(*RedisIndex)
-	ctx := log.IntoContext(context.Background(), logr.Discard())
+func BenchmarkRedisClearScaleReverseIndex(b *testing.B) {
+	benchmarkRedisClearScale(b, true)
+}
+
+func BenchmarkRedisIndexOperations(b *testing.B) {
+	b.Run("Add/keys=1024/pods=1", func(b *testing.B) {
+		index, ctx := newRedisBenchmarkIndex(b)
+		keys := benchmarkBlockHashes(1024)
+		entries := benchmarkPodEntries(1)
+
+		for i := 0; i < b.N; i++ {
+			b.StopTimer()
+			require.NoError(b, index.RedisClient.FlushDB(ctx).Err())
+			b.StartTimer()
+
+			require.NoError(b, index.Add(ctx, keys, keys, entries))
+		}
+	})
+
+	b.Run("Lookup/keys=1024/pods=1", func(b *testing.B) {
+		index, ctx := newRedisBenchmarkIndex(b)
+		keys := benchmarkBlockHashes(1024)
+		entries := benchmarkPodEntries(1)
+		require.NoError(b, index.Add(ctx, keys, keys, entries))
+
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			_, err := index.Lookup(ctx, keys, sets.Set[string]{})
+			require.NoError(b, err)
+		}
+	})
+
+	b.Run("GetRequestKey", func(b *testing.B) {
+		index, ctx := newRedisBenchmarkIndex(b)
+		engineKey := BlockHash(1001)
+		requestKey := BlockHash(2001)
+		entries := benchmarkPodEntries(1)
+		require.NoError(b, index.Add(ctx, []BlockHash{engineKey}, []BlockHash{requestKey}, entries))
+
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			_, err := index.GetRequestKey(ctx, engineKey)
+			require.NoError(b, err)
+		}
+	})
+
+	b.Run("EvictRequestKey/pods=1", func(b *testing.B) {
+		index, ctx := newRedisBenchmarkIndex(b)
+		requestKey := BlockHash(2001)
+		entries := benchmarkPodEntries(1)
+
+		for i := 0; i < b.N; i++ {
+			b.StopTimer()
+			require.NoError(b, index.RedisClient.FlushDB(ctx).Err())
+			require.NoError(b, index.Add(ctx, nil, []BlockHash{requestKey}, entries))
+			b.StartTimer()
+
+			require.NoError(b, index.Evict(ctx, requestKey, RequestKey, entries))
+		}
+	})
+
+	b.Run("EvictEngineKey/pods=1", func(b *testing.B) {
+		index, ctx := newRedisBenchmarkIndex(b)
+		engineKey := BlockHash(1001)
+		requestKey := BlockHash(2001)
+		entries := benchmarkPodEntries(1)
+
+		for i := 0; i < b.N; i++ {
+			b.StopTimer()
+			require.NoError(b, index.RedisClient.FlushDB(ctx).Err())
+			require.NoError(b, index.Add(ctx, []BlockHash{engineKey}, []BlockHash{requestKey}, entries))
+			b.StartTimer()
+
+			require.NoError(b, index.Evict(ctx, engineKey, EngineKey, entries))
+		}
+	})
+
+	b.Run("Clear/keys=1024/pods=8", func(b *testing.B) {
+		index, ctx := newRedisBenchmarkIndex(b)
+		tc := redisClearBenchmarkCase{
+			name:           "keys=1024/unrelated=1024/pods=8",
+			keyCount:       1024,
+			podCount:       8,
+			unrelatedCount: 1024,
+		}
+
+		for i := 0; i < b.N; i++ {
+			b.StopTimer()
+			require.NoError(b, index.RedisClient.FlushDB(ctx).Err())
+			seedRedisClearBenchmarkData(b, ctx, index, tc, true)
+			b.StartTimer()
+
+			require.NoError(b, index.Clear(ctx, "pod-0"))
+		}
+	})
+}
+
+type redisClearBenchmarkCase struct {
+	name           string
+	keyCount       int
+	podCount       int
+	unrelatedCount int
+}
+
+func benchmarkRedisClearScale(b *testing.B, reverseIndex bool) {
+	cases := []redisClearBenchmarkCase{
+		{name: "keys=512/unrelated=512/pods=8", keyCount: 512, podCount: 8, unrelatedCount: 512},
+		{name: "keys=2048/unrelated=2048/pods=8", keyCount: 2048, podCount: 8, unrelatedCount: 2048},
+		{name: "keys=8192/unrelated=8192/pods=8", keyCount: 8192, podCount: 8, unrelatedCount: 8192},
+		{name: "keys=32768/unrelated=32768/pods=8", keyCount: 32768, podCount: 8, unrelatedCount: 32768},
+	}
+	for _, tc := range cases {
+		b.Run(tc.name, func(b *testing.B) {
+			benchmarkRedisClear(b, tc, reverseIndex)
+		})
+	}
+}
+
+func benchmarkRedisClear(b *testing.B, tc redisClearBenchmarkCase, reverseIndex bool) {
+	redisIndex, ctx := newRedisBenchmarkIndex(b)
 	const targetPod = "pod-0"
 
 	for i := 0; i < b.N; i++ {
 		b.StopTimer()
 		require.NoError(b, redisIndex.RedisClient.FlushDB(ctx).Err())
-		seedRedisClearBenchmarkData(b, ctx, redisIndex, reverseIndex)
+		seedRedisClearBenchmarkData(b, ctx, redisIndex, tc, reverseIndex)
 		b.StartTimer()
 
 		if reverseIndex {
@@ -156,27 +281,47 @@ func benchmarkRedisClear(b *testing.B, reverseIndex bool) {
 	}
 }
 
-func seedRedisClearBenchmarkData(b *testing.B, ctx context.Context, index *RedisIndex, reverseIndex bool) {
+func newRedisBenchmarkIndex(b *testing.B) (*RedisIndex, context.Context) {
 	b.Helper()
-	const (
-		keyCount       = 512
-		podCount       = 8
-		unrelatedCount = 512
-	)
+	server, err := miniredis.Run()
+	require.NoError(b, err)
+	b.Cleanup(server.Close)
 
-	entries := make([]PodEntry, 0, podCount)
-	for pod := 0; pod < podCount; pod++ {
-		entries = append(entries, PodEntry{PodIdentifier: fmt.Sprintf("pod-%d", pod), DeviceTier: "gpu"})
+	index, err := NewRedisIndex(&RedisIndexConfig{Address: server.Addr()})
+	require.NoError(b, err)
+	redisIndex := index.(*RedisIndex)
+	return redisIndex, log.IntoContext(context.Background(), logr.Discard())
+}
+
+func benchmarkBlockHashes(count int) []BlockHash {
+	keys := make([]BlockHash, count)
+	for i := range keys {
+		keys[i] = BlockHash(i + 1)
 	}
+	return keys
+}
+
+func benchmarkPodEntries(count int) []PodEntry {
+	entries := make([]PodEntry, count)
+	for i := range entries {
+		entries[i] = PodEntry{PodIdentifier: fmt.Sprintf("pod-%d", i), DeviceTier: "gpu"}
+	}
+	return entries
+}
+
+func seedRedisClearBenchmarkData(b *testing.B, ctx context.Context, index *RedisIndex, tc redisClearBenchmarkCase, reverseIndex bool) {
+	b.Helper()
+
+	entries := benchmarkPodEntries(tc.podCount)
 
 	if reverseIndex {
-		for key := 0; key < keyCount; key++ {
+		for key := 0; key < tc.keyCount; key++ {
 			blockHash := BlockHash(key + 1)
 			require.NoError(b, index.Add(ctx, nil, []BlockHash{blockHash}, entries))
 		}
 	} else {
 		pipe := index.RedisClient.Pipeline()
-		for key := 0; key < keyCount; key++ {
+		for key := 0; key < tc.keyCount; key++ {
 			redisKey := strconv.Itoa(key + 1)
 			for _, entry := range entries {
 				pipe.HSet(ctx, redisKey, entry.String(), "")
@@ -187,7 +332,7 @@ func seedRedisClearBenchmarkData(b *testing.B, ctx context.Context, index *Redis
 	}
 
 	pipe := index.RedisClient.Pipeline()
-	for key := 0; key < unrelatedCount; key++ {
+	for key := 0; key < tc.unrelatedCount; key++ {
 		pipe.HSet(ctx, fmt.Sprintf("unrelated:%d", key), "other@gpu", "")
 	}
 	_, err := pipe.Exec(ctx)
