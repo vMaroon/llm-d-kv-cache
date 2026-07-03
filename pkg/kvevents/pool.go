@@ -113,14 +113,27 @@ type Pool struct {
 	// tier, KV-cache group, DP rank) and a store must be counted only after
 	// Index.Add succeeds — both of which only the Pool observes.
 	dedup *eventDedupFilter
-	wg    sync.WaitGroup
+	// sessionView, when set, receives a session-granular projection of the
+	// same events that feed the block index — same worker, same per-pod
+	// ordering, updated in the same pass.
+	sessionView SessionView
+	wg          sync.WaitGroup
+}
+
+// PoolOption customizes a Pool.
+type PoolOption func(*Pool)
+
+// WithSessionView attaches a session-granular projection fed alongside the
+// block index.
+func WithSessionView(view SessionView) PoolOption {
+	return func(p *Pool) { p.sessionView = view }
 }
 
 // NewPool creates a Pool with a sharded worker setup.
 // Subscribers are managed by SubscriberManager which is controlled by the pod
 // reconciler.
 func NewPool(cfg *Config, index kvblock.Index, tokenProcessor kvblock.TokenProcessor,
-	adapter EngineAdapter,
+	adapter EngineAdapter, opts ...PoolOption,
 ) *Pool {
 	if cfg == nil {
 		cfg = DefaultConfig()
@@ -134,6 +147,9 @@ func NewPool(cfg *Config, index kvblock.Index, tokenProcessor kvblock.TokenProce
 		adapter:        adapter,
 		groupCatalog:   kvblock.NewGroupCatalog(),
 		dedup:          newEventDedupFilter(),
+	}
+	for _, opt := range opts {
+		opt(p)
 	}
 
 	for i := 0; i < p.concurrency; i++ {
@@ -459,6 +475,16 @@ func (p *Pool) processEventBatch(ctx context.Context, batch *EventBatch, podIden
 			}
 			p.dedup.trackStore(storeScope, ev.BlockHashes)
 
+			// Session projection: same event, same worker, same ordering.
+			if p.sessionView != nil && ev.SessionTag != nil && *ev.SessionTag != "" {
+				continuationID := ""
+				if ev.ContinuationID != nil {
+					continuationID = *ev.ContinuationID
+				}
+				p.sessionView.AddBlocks(podIdentifier, deviceTier, *ev.SessionTag, continuationID,
+					ev.BlockHashes, len(ev.Tokens))
+			}
+
 		case *BlockRemovedEvent:
 			deviceTier := normalizeDeviceTier(ev.DeviceTier)
 
@@ -505,11 +531,22 @@ func (p *Pool) processEventBatch(ctx context.Context, batch *EventBatch, podIden
 				}
 			}
 
+			// Session projection: evictions breach continuation segments,
+			// truncating the affected sessions' high-water. The view consumes
+			// the same dedup-filtered hashes the index evicts, so a remove
+			// suppressed by an outstanding duplicate store breaches nothing.
+			if p.sessionView != nil {
+				p.sessionView.RemoveBlocks(podIdentifier, hashesToEvict)
+			}
+
 		case *AllBlocksClearedEvent:
 			debugLogger.Info("All blocks cleared event received",
 				"podIdentifier", podIdentifier,
 				"deviceTier", ev.DeviceTier,
 				"modelName", modelName)
+			if p.sessionView != nil {
+				p.sessionView.ClearPod(podIdentifier)
+			}
 
 			// AllBlocksCleared is pod-wide: vLLM reset its entire prefix cache
 			// (e.g. after an RLHF weight update), so drop every entry for this pod

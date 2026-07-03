@@ -141,6 +141,7 @@ var (
 		"block_hashes", "parent_block_hash", "token_ids", "block_size",
 		"lora_id", "medium", "lora_name", "extra_keys", "group_idx",
 		"kv_cache_spec_kind", "kv_cache_spec_sliding_window",
+		"session_tag", "continuation_id",
 	}
 	blockRemovedFieldOrder = []string{"block_hashes", "medium", "group_idx"}
 )
@@ -201,6 +202,8 @@ func fieldAt(fields []any, i int) any {
 //	[9]  group_idx                    int|nil           (optional, HMA)
 //	[10] kv_cache_spec_kind           string|nil        (optional, HMA)
 //	[11] kv_cache_spec_sliding_window int|nil           (optional, HMA)
+//	[12] session_tag                  string|nil        (optional, session-tagged KV)
+//	[13] continuation_id              string|nil        (optional, session-tagged KV)
 //
 // Trailing fields may be absent in older vLLM versions. Extra trailing fields
 // from newer vLLM versions are silently ignored.
@@ -315,6 +318,9 @@ func (v *VLLMAdapter) convertBlockStoredEvent(fields []any) (kvevents.GenericEve
 		slidingWindow = &window
 	}
 
+	// [12],[13] session_tag, continuation_id (optional)
+	sessionTag, continuationID := trailingSessionFields(fields)
+
 	return &kvevents.BlockStoredEvent{
 		BlockHashes:                  blockHashes,
 		Tokens:                       tokens,
@@ -327,7 +333,33 @@ func (v *VLLMAdapter) convertBlockStoredEvent(fields []any) (kvevents.GenericEve
 		GroupIdx:                     groupIdx,
 		KVCacheSpecKind:              specKind,
 		KVCacheSpecSlidingWindowSize: slidingWindow,
+		SessionTag:                   sessionTag,
+		ContinuationID:               continuationID,
 	}, nil
+}
+
+// trailingSessionFields extracts the optional (session_tag, continuation_id)
+// pair from a BlockStored field array. Engines that do not emit session
+// labels omit the fields (or emit nil / empty strings); all of these yield
+// (nil, nil). Two emitting layouts exist: [12],[13] after the HMA group/spec
+// fields (current vLLM), and [9],[10] directly after extra_keys (pre-HMA
+// engines). The layouts cannot be confused: [9] is group_idx in the current
+// layout, an int, so a string at [9] is unambiguously a session tag.
+func trailingSessionFields(fields []any) (sessionTag, continuationID *string) {
+	readPair := func(i int) (*string, *string) {
+		var tag, cont *string
+		if s, ok := fieldAt(fields, i).(string); ok && s != "" {
+			tag = &s
+		}
+		if s, ok := fieldAt(fields, i+1).(string); ok && s != "" {
+			cont = &s
+		}
+		return tag, cont
+	}
+	if _, isString := fieldAt(fields, 9).(string); isString {
+		return readPair(9)
+	}
+	return readPair(12)
 }
 
 // convertBlockRemovedEvent converts a decoded []any into a BlockRemovedEvent.

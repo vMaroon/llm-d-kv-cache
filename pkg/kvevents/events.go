@@ -95,6 +95,11 @@ type BlockStoredEvent struct {
 	KVCacheSpecKind KVCacheSpecKind
 	// KVCacheSpecSlidingWindowSize carries the SWA window size when applicable.
 	KVCacheSpecSlidingWindowSize *int
+	// SessionTag and ContinuationID are opaque session-identity labels echoed
+	// by engines that support session-tagged KV events. They feed the
+	// SessionView; engines that do not emit them leave both nil.
+	SessionTag     *string
+	ContinuationID *string
 }
 
 // Type returns the event type.
