@@ -195,27 +195,16 @@ func (v *InMemorySessionView) RemoveBlocks(pod string, blockHashes []uint64) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	for _, h := range blockHashes {
-		refs := v.blockRef[h]
-		if len(refs) == 0 {
-			continue
-		}
-		kept := refs[:0]
-		for _, seg := range refs {
-			if seg.pod != pod {
-				kept = append(kept, seg)
-				continue
-			}
+		for _, seg := range v.blockRef[h] {
 			// Breach: the segment loses a block. alive is a count, not a
-			// per-hash ledger — content-addressed blocks are stored once per
-			// pod, so one removal event maps to one stored block.
-			if seg.alive > 0 {
+			// per-hash ledger — per-pod event ordering guarantees stores and
+			// removals of one hash alternate, so one removal maps to one
+			// stored block. The reference is KEPT: a breached segment must
+			// stay reachable so re-admission of the same content hash can
+			// heal it (segments are dropped only with their session or pod).
+			if seg.pod == pod && seg.alive > 0 {
 				seg.alive--
 			}
-		}
-		if len(kept) == 0 {
-			delete(v.blockRef, h)
-		} else {
-			v.blockRef[h] = kept
 		}
 	}
 }
