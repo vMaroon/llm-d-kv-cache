@@ -142,6 +142,33 @@ func (v *InMemorySessionView) AddBlocks(pod, tier, sessionTag, continuationID st
 		state.pods[pod] = chain
 	}
 
+	// Re-admission heals: blocks are content-addressed, so a hash stored
+	// again on this pod after an eviction is the SAME block coming back.
+	// Every breached segment referencing it on this pod regains a life —
+	// without healing, one evict-and-reprefill cycle would truncate the
+	// session's residency forever and turn engine truth into false-cold.
+	// A hash that heals THIS session's own segment is not re-recorded (the
+	// chain position already accounts for it); a hash that only heals other
+	// sessions' segments still gets recorded under this session's chain.
+	fresh := blockHashes[:0:0]
+	for _, h := range blockHashes {
+		healedOwn := false
+		for _, ref := range v.blockRef[h] {
+			if ref.pod == pod && ref.alive < ref.total {
+				ref.alive++
+				if ref.sessionTag == sessionTag {
+					healedOwn = true
+				}
+			}
+		}
+		if !healedOwn {
+			fresh = append(fresh, h)
+		}
+	}
+	if len(fresh) == 0 {
+		return
+	}
+
 	// Same continuation as the tail segment: extend it (one continuation's
 	// blocks may arrive across several events). Otherwise a new segment.
 	var seg *segment
@@ -151,14 +178,14 @@ func (v *InMemorySessionView) AddBlocks(pod, tier, sessionTag, continuationID st
 		seg = &segment{sessionTag: sessionTag, continuationID: continuationID, pod: pod, tier: tier}
 		chain.segments = append(chain.segments, seg)
 	}
-	seg.total += len(blockHashes)
-	seg.alive += len(blockHashes)
+	seg.total += len(fresh)
+	seg.alive += len(fresh)
 	seg.tokens += tokenCount
 	if tier != "" {
 		seg.tier = tier
 	}
-	seg.hashes = append(seg.hashes, blockHashes...)
-	for _, h := range blockHashes {
+	seg.hashes = append(seg.hashes, fresh...)
+	for _, h := range fresh {
 		v.blockRef[h] = append(v.blockRef[h], seg)
 	}
 }

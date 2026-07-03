@@ -118,6 +118,45 @@ func TestSessionViewSharedBlockBreachesAllSessions(t *testing.T) {
 	}
 }
 
+func TestSessionViewReadmissionHeals(t *testing.T) {
+	// Evict-and-reprefill: the same content hashes stored again must heal
+	// the breached segments, or one churn cycle turns residency false-cold
+	// forever.
+	v := NewInMemorySessionView(0, 0)
+	v.AddBlocks("pod-a", "gpu", "s1", "c1", []uint64{1, 2, 3}, 48)
+	v.AddBlocks("pod-a", "gpu", "s1", "c2", []uint64{4, 5}, 32)
+
+	v.RemoveBlocks("pod-a", []uint64{2, 4})
+	if r := residencyFor(t, v, "s1", "pod-a"); r.Tokens != 0 {
+		t.Fatalf("post-eviction residency must be truncated: %+v", r)
+	}
+
+	// The next turn re-prefills the evicted blocks (same content hashes).
+	v.AddBlocks("pod-a", "gpu", "s1", "c3", []uint64{2, 4, 6}, 24)
+
+	r := residencyFor(t, v, "s1", "pod-a")
+	if r.UpTo != "c3" || r.Tokens != 48+32+24 {
+		t.Fatalf("re-admission must heal the chain end to end: %+v", r)
+	}
+}
+
+func TestSessionViewHealOtherSessionStillRecordsOwn(t *testing.T) {
+	// A block healing another session's breached segment still counts for
+	// the storing session's own chain (shared templates across sessions).
+	v := NewInMemorySessionView(0, 0)
+	v.AddBlocks("pod-a", "gpu", "old", "c1", []uint64{1, 2}, 32)
+	v.RemoveBlocks("pod-a", []uint64{1})
+
+	v.AddBlocks("pod-a", "gpu", "new", "c1", []uint64{1, 2}, 32)
+
+	if r := residencyFor(t, v, "new", "pod-a"); r.Tokens != 32 {
+		t.Fatalf("storing session must keep its own claim: %+v", r)
+	}
+	if r := residencyFor(t, v, "old", "pod-a"); r.Tokens != 32 {
+		t.Fatalf("breached session must be healed by re-admission: %+v", r)
+	}
+}
+
 func TestSessionViewTTLExpiry(t *testing.T) {
 	v := NewInMemorySessionView(time.Minute, 0)
 	base := time.Unix(1_000_000, 0)
