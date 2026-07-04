@@ -170,3 +170,22 @@ func TestSessionViewTTLExpiry(t *testing.T) {
 		t.Fatalf("expired session must be dropped: %+v", r)
 	}
 }
+
+func TestSessionViewPodMass(t *testing.T) {
+	v := NewInMemorySessionView(0, 0)
+	v.AddBlocks("pod-a", "gpu", "s1", "c1", []uint64{1, 2}, 32)
+	v.AddBlocks("pod-a", "gpu", "s2", "c1", []uint64{3}, 16)
+	v.AddBlocks("pod-b", "gpu", "s1", "c1", []uint64{4}, 16)
+
+	m := v.PodMass()
+	if m["pod-a"] != 48 || m["pod-b"] != 16 {
+		t.Fatalf("mass = %v, want pod-a 48, pod-b 16", m)
+	}
+
+	// A breach removes the segment (and everything after it) from the mass.
+	v.RemoveBlocks("pod-a", []uint64{1})
+	m = v.PodMass()
+	if m["pod-a"] != 16 {
+		t.Fatalf("post-breach mass = %v, want pod-a 16 (s2 only)", m)
+	}
+}

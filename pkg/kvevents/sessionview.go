@@ -39,6 +39,11 @@ type SessionView interface {
 	// Residency reports, per pod, the deepest intact continuation and the
 	// engine-unit token count covered by the intact prefix.
 	Residency(sessionTag string) []SessionResidency
+	// PodMass reports, per pod, the total engine-unit tokens of intact
+	// session segments resident there — the pod's protected session mass.
+	// Placement policies use it to steer unaffiliated traffic toward pods
+	// with the least to lose (sacrificial placement).
+	PodMass() map[string]int
 }
 
 // SessionResidency is one pod's residency for a session.
@@ -221,6 +226,26 @@ func (v *InMemorySessionView) ClearPod(pod string) {
 			delete(state.pods, pod)
 		}
 	}
+}
+
+// PodMass implements SessionView. Computed by walking sessions' intact
+// prefixes; bounded by session/segment counts, called per scheduling
+// decision at most.
+func (v *InMemorySessionView) PodMass() map[string]int {
+	v.mu.RLock()
+	defer v.mu.RUnlock()
+	mass := map[string]int{}
+	for _, state := range v.sessions {
+		for pod, chain := range state.pods {
+			for _, seg := range chain.segments {
+				if !seg.intact() {
+					break
+				}
+				mass[pod] += seg.tokens
+			}
+		}
+	}
+	return mass
 }
 
 // Residency implements SessionView.
