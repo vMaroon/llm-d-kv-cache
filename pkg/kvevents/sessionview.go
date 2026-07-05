@@ -39,11 +39,35 @@ type SessionView interface {
 	// Residency reports, per pod, the deepest intact continuation and the
 	// engine-unit token count covered by the intact prefix.
 	Residency(sessionTag string) []SessionResidency
+	// LongestSurvivingPrefix reports, per pod, the deepest position of the
+	// given continuation-id chain (ordered shallow to deep) whose stored
+	// prefix survives — regardless of which session stored it.
+	// Content-derived continuation ids are shared across forks and re-mints
+	// by construction, so a rewritten lineage matches every position before
+	// its divergence, whoever stored them.
+	LongestSurvivingPrefix(chain []string) map[string]ChainSurvival
 	// PodMass reports, per pod, the total engine-unit tokens of intact
 	// session segments resident there — the pod's protected session mass.
 	// Placement policies use it to steer unaffiliated traffic toward pods
 	// with the least to lose (sacrificial placement).
 	PodMass() map[string]int
+}
+
+// ChainSurvival is one pod's deepest surviving prefix for a continuation-id
+// chain. Known reports that the view holds ANY evidence for the chain on the
+// pod — intact or breached — so a consumer can tell "the engine reported and
+// the prefix is gone" from "no engine report yet": confirmed evidence
+// replaces estimates only where it exists.
+type ChainSurvival struct {
+	// Pod is the pod identifier the survival describes.
+	Pod string
+	// Tier is the device tier of the deepest surviving segment.
+	Tier string
+	// Tokens is the engine-unit token count of the surviving prefix.
+	Tokens int
+	// Known reports whether the view has any segment for this chain on the
+	// pod, regardless of survival.
+	Known bool
 }
 
 // SessionResidency is one pod's residency for a session.
@@ -91,6 +115,11 @@ type InMemorySessionView struct {
 	// blockRef maps a block hash to every segment referencing it on any pod;
 	// one eviction breaches all of them.
 	blockRef map[uint64][]*segment
+	// contIndex maps a continuation id to every segment stored under it,
+	// across sessions and pods — the cross-lineage join: forks and re-mints
+	// share continuation ids for shared content, so a chain lookup finds the
+	// prefix whoever stored it.
+	contIndex map[string][]*segment
 
 	ttl         time.Duration
 	maxSessions int
@@ -115,6 +144,7 @@ func NewInMemorySessionView(ttl time.Duration, maxSessions int) *InMemorySession
 	return &InMemorySessionView{
 		sessions:    map[string]*sessionState{},
 		blockRef:    map[uint64][]*segment{},
+		contIndex:   map[string][]*segment{},
 		ttl:         ttl,
 		maxSessions: maxSessions,
 		now:         time.Now,
@@ -182,6 +212,7 @@ func (v *InMemorySessionView) AddBlocks(pod, tier, sessionTag, continuationID st
 	} else {
 		seg = &segment{sessionTag: sessionTag, continuationID: continuationID, pod: pod, tier: tier}
 		chain.segments = append(chain.segments, seg)
+		v.contIndex[continuationID] = append(v.contIndex[continuationID], seg)
 	}
 	seg.total += len(fresh)
 	seg.alive += len(fresh)
@@ -274,6 +305,62 @@ func (v *InMemorySessionView) Residency(sessionTag string) []SessionResidency {
 	return out
 }
 
+// LongestSurvivingPrefix implements SessionView. Positions are scanned
+// deepest-first; a pod resolves at the deepest position where some session's
+// stored chain is intact through the matching segment, with the extent being
+// that chain's cumulative engine-unit tokens. Among candidates at the same
+// position the largest extent wins.
+func (v *InMemorySessionView) LongestSurvivingPrefix(chain []string) map[string]ChainSurvival {
+	v.mu.RLock()
+	defer v.mu.RUnlock()
+	out := map[string]ChainSurvival{}
+	for i := len(chain) - 1; i >= 0; i-- {
+		for _, seg := range v.contIndex[chain[i]] {
+			cur, seen := out[seg.pod]
+			if !seen {
+				cur = ChainSurvival{Pod: seg.pod}
+			}
+			cur.Known = true
+			if cur.Tokens > 0 {
+				// Already resolved at a deeper position of this chain.
+				out[seg.pod] = cur
+				continue
+			}
+			if tokens, tier, ok := v.intactThroughLocked(seg); ok && tokens > cur.Tokens {
+				cur.Tokens, cur.Tier = tokens, tier
+			}
+			out[seg.pod] = cur
+		}
+	}
+	return out
+}
+
+// intactThroughLocked reports the cumulative engine-unit tokens of the
+// target segment's (session, pod) chain through the target, valid only when
+// every segment up to and including it is intact. Callers must hold v.mu.
+func (v *InMemorySessionView) intactThroughLocked(target *segment) (int, string, bool) {
+	state, ok := v.sessions[target.sessionTag]
+	if !ok {
+		return 0, "", false
+	}
+	chain, ok := state.pods[target.pod]
+	if !ok {
+		return 0, "", false
+	}
+	tokens, tier := 0, ""
+	for _, seg := range chain.segments {
+		if !seg.intact() {
+			return 0, "", false
+		}
+		tokens += seg.tokens
+		tier = seg.tier
+		if seg == target {
+			return tokens, tier, true
+		}
+	}
+	return 0, "", false
+}
+
 // RemoveExpired drops sessions idle past the TTL. The view runs no background
 // sweeper of its own; callers invoke it periodically. Independently, an
 // insertion at capacity reaps expired sessions before evicting live ones.
@@ -321,8 +408,8 @@ func (v *InMemorySessionView) dropLocked(tag string, state *sessionState) {
 	delete(v.sessions, tag)
 }
 
-// unrefLocked removes a segment from the block reference map. Callers must
-// hold v.mu.
+// unrefLocked removes a segment from the block reference and continuation
+// indexes. Callers must hold v.mu.
 func (v *InMemorySessionView) unrefLocked(seg *segment) {
 	for _, h := range seg.hashes {
 		refs := v.blockRef[h]
@@ -337,5 +424,17 @@ func (v *InMemorySessionView) unrefLocked(seg *segment) {
 		} else {
 			v.blockRef[h] = kept
 		}
+	}
+	crefs := v.contIndex[seg.continuationID]
+	ckept := crefs[:0]
+	for _, s := range crefs {
+		if s != seg {
+			ckept = append(ckept, s)
+		}
+	}
+	if len(ckept) == 0 {
+		delete(v.contIndex, seg.continuationID)
+	} else {
+		v.contIndex[seg.continuationID] = ckept
 	}
 }

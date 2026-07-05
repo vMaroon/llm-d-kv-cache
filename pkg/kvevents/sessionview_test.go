@@ -189,3 +189,69 @@ func TestSessionViewPodMass(t *testing.T) {
 		t.Fatalf("post-breach mass = %v, want pod-a 16 (s2 only)", m)
 	}
 }
+
+func TestChainSurvivalCrossLineage(t *testing.T) {
+	// A re-minted or forked lineage shares continuation ids for content
+	// before its divergence; the chain lookup must credit the parent's
+	// stored prefix, whoever stored it.
+	v := NewInMemorySessionView(0, 0)
+	v.AddBlocks("podA", "gpu", "parent", "c1", []uint64{1, 2}, 3200)
+	v.AddBlocks("podA", "gpu", "parent", "c2", []uint64{3}, 800)
+
+	got := v.LongestSurvivingPrefix([]string{"c1", "c2", "c9"})
+	s, ok := got["podA"]
+	if !ok || !s.Known {
+		t.Fatalf("chain sharing c1,c2 must be known on podA: %+v", got)
+	}
+	if s.Tokens != 4000 {
+		t.Fatalf("survival through c2 = 4000 tokens, got %d", s.Tokens)
+	}
+
+	// A chain diverging after c1 only credits through c1.
+	got = v.LongestSurvivingPrefix([]string{"c1", "x2", "x3"})
+	if s := got["podA"]; s.Tokens != 3200 {
+		t.Fatalf("survival through c1 = 3200 tokens, got %d", s.Tokens)
+	}
+}
+
+func TestChainSurvivalBreachIsKnownCold(t *testing.T) {
+	// Eviction breaches the stored chain: survival drops, but the pod stays
+	// Known — confirmed-cold, not unknown. Healing restores it.
+	v := NewInMemorySessionView(0, 0)
+	v.AddBlocks("podA", "gpu", "s", "c1", []uint64{1, 2}, 3200)
+	v.RemoveBlocks("podA", []uint64{1})
+
+	got := v.LongestSurvivingPrefix([]string{"c1", "c2"})
+	s := got["podA"]
+	if !s.Known || s.Tokens != 0 {
+		t.Fatalf("breached chain must be Known with zero survival: %+v", s)
+	}
+
+	v.AddBlocks("podA", "gpu", "other", "c1", []uint64{1}, 1600)
+	got = v.LongestSurvivingPrefix([]string{"c1"})
+	if s := got["podA"]; s.Tokens != 3200 {
+		t.Fatalf("healed chain must recover full survival, got %d", s.Tokens)
+	}
+}
+
+func TestChainSurvivalDeepestPositionWins(t *testing.T) {
+	// A pod resolving at a deeper chain position keeps that result even if a
+	// shallower position carries a larger extent from another session.
+	v := NewInMemorySessionView(0, 0)
+	v.AddBlocks("podA", "gpu", "deep", "c1", []uint64{1}, 1600)
+	v.AddBlocks("podA", "gpu", "deep", "c2", []uint64{2}, 160)
+	v.AddBlocks("podA", "gpu", "wide", "c1", []uint64{3}, 8000)
+
+	got := v.LongestSurvivingPrefix([]string{"c1", "c2"})
+	if s := got["podA"]; s.Tokens != 1760 {
+		t.Fatalf("deepest position governs: want 1760 through c2, got %d", s.Tokens)
+	}
+
+	// Dropped session falls out of the join.
+	v.sessions["deep"].lastSeen = v.now().Add(-time.Hour)
+	v.RemoveExpired()
+	got = v.LongestSurvivingPrefix([]string{"c1", "c2"})
+	if s := got["podA"]; s.Tokens != 8000 {
+		t.Fatalf("after drop, the shallower survivor governs: want 8000, got %d", s.Tokens)
+	}
+}
