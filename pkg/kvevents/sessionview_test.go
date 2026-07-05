@@ -234,24 +234,46 @@ func TestChainSurvivalBreachIsKnownCold(t *testing.T) {
 	}
 }
 
-func TestChainSurvivalDeepestPositionWins(t *testing.T) {
-	// A pod resolving at a deeper chain position keeps that result even if a
-	// shallower position carries a larger extent from another session.
+func TestChainSurvivalSumsAcrossReMintedTags(t *testing.T) {
+	// The re-mint case the fix exists for: turns 1-2 stored under the original
+	// tag, turn 3 re-minted to a new tag owning only its own suffix segment.
+	// Survival must sum the matched heads across tags to reconstruct the full
+	// prefix, not return the deep re-mint's tiny suffix alone.
 	v := NewInMemorySessionView(0, 0)
-	v.AddBlocks("podA", "gpu", "deep", "c1", []uint64{1}, 1600)
-	v.AddBlocks("podA", "gpu", "deep", "c2", []uint64{2}, 160)
-	v.AddBlocks("podA", "gpu", "wide", "c1", []uint64{3}, 8000)
+	v.AddBlocks("podA", "gpu", "t1", "c1", []uint64{1}, 1000)
+	v.AddBlocks("podA", "gpu", "t1", "c2", []uint64{2}, 1000)
+	v.AddBlocks("podA", "gpu", "t2", "c3", []uint64{3}, 1000) // re-mint owns only c3
 
-	got := v.LongestSurvivingPrefix([]string{"c1", "c2"})
-	if s := got["podA"]; s.Tokens != 1760 {
-		t.Fatalf("deepest position governs: want 1760 through c2, got %d", s.Tokens)
+	got := v.LongestSurvivingPrefix([]string{"c1", "c2", "c3", "c9"})
+	if s := got["podA"]; s.Tokens != 3000 {
+		t.Fatalf("re-mint must credit the ancestor prefix across tags: got %d, want 3000", s.Tokens)
 	}
 
-	// Dropped session falls out of the join.
-	v.sessions["deep"].lastSeen = v.now().Add(-time.Hour)
+	// Dropping the ancestor tag drops its contribution; the re-mint's own
+	// suffix still resolves.
+	v.sessions["t1"].lastSeen = v.now().Add(-time.Hour)
 	v.RemoveExpired()
-	got = v.LongestSurvivingPrefix([]string{"c1", "c2"})
-	if s := got["podA"]; s.Tokens != 8000 {
-		t.Fatalf("after drop, the shallower survivor governs: want 8000, got %d", s.Tokens)
+	got = v.LongestSurvivingPrefix([]string{"c1", "c2", "c3"})
+	if s := got["podA"]; s.Tokens != 1000 {
+		t.Fatalf("after ancestor drop only the re-mint suffix remains: got %d, want 1000", s.Tokens)
+	}
+}
+
+func TestChainSurvivalBreaksAtMiddleBreach(t *testing.T) {
+	// An evicted middle head truncates the contiguous prefix even if deeper
+	// heads survive: the engine can only reuse up to the gap.
+	v := NewInMemorySessionView(0, 0)
+	v.AddBlocks("podA", "gpu", "t", "c1", []uint64{1}, 1000)
+	v.AddBlocks("podA", "gpu", "t", "c2", []uint64{2}, 1000)
+	v.AddBlocks("podA", "gpu", "t", "c3", []uint64{3}, 1000)
+	v.RemoveBlocks("podA", []uint64{2}) // evict turn-2 block -> c2 breached
+
+	got := v.LongestSurvivingPrefix([]string{"c1", "c2", "c3"})
+	s := got["podA"]
+	if !s.Known {
+		t.Fatal("a breached prefix must stay Known")
+	}
+	if s.Tokens != 1000 {
+		t.Fatalf("middle breach truncates to the surviving prefix: got %d, want 1000", s.Tokens)
 	}
 }

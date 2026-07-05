@@ -305,61 +305,77 @@ func (v *InMemorySessionView) Residency(sessionTag string) []SessionResidency {
 	return out
 }
 
-// LongestSurvivingPrefix implements SessionView. Positions are scanned
-// deepest-first; a pod resolves at the deepest position where some session's
-// stored chain is intact through the matching segment, with the extent being
-// that chain's cumulative engine-unit tokens. Among candidates at the same
-// position the largest extent wins.
+// LongestSurvivingPrefix implements SessionView. Per pod, the chain is walked
+// shallow to deep and the intact stored segments matching each position are
+// summed, stopping at the first position whose segment is breached. The sum
+// is taken ACROSS session tags: each turn stores only its new blocks under
+// its stamped head continuation-id, so a lineage that re-minted mid-stream
+// leaves its prefix under earlier tags' heads and its suffix under later
+// ones — summing the matched heads reconstructs the full prefix a single
+// tag's residency cannot. On any pod each block is stored once (BlockStored
+// fires only for newly-computed blocks, per pod), so summing does not double
+// count; and a turn served on a pod carries the whole prefix there (reuse
+// what is cached, recompute the rest), so a head absent on a pod is a gap
+// filled under a later head, not a break — only an eviction (breach) breaks
+// the contiguous prefix.
 func (v *InMemorySessionView) LongestSurvivingPrefix(chain []string) map[string]ChainSurvival {
 	v.mu.RLock()
 	defer v.mu.RUnlock()
 	out := map[string]ChainSurvival{}
-	for i := len(chain) - 1; i >= 0; i-- {
-		for _, seg := range v.contIndex[chain[i]] {
-			cur, seen := out[seg.pod]
-			if !seen {
-				cur = ChainSurvival{Pod: seg.pod}
-			}
+	broken := map[string]bool{}
+	for _, cid := range chain { // shallow -> deep
+		for pod, w := range v.witnessByPodLocked(cid) {
+			cur := out[pod]
+			cur.Pod = pod
 			cur.Known = true
-			if cur.Tokens > 0 {
-				// Already resolved at a deeper position of this chain.
-				out[seg.pod] = cur
-				continue
+			if !broken[pod] {
+				if w.intact {
+					cur.Tokens += w.tokens
+					cur.Tier = w.tier
+				} else {
+					// This position was stored on the pod but a block was
+					// evicted: the reusable prefix ends here.
+					broken[pod] = true
+				}
 			}
-			if tokens, tier, ok := v.intactThroughLocked(seg); ok && tokens > cur.Tokens {
-				cur.Tokens, cur.Tier = tokens, tier
-			}
-			out[seg.pod] = cur
+			out[pod] = cur
 		}
 	}
 	return out
 }
 
-// intactThroughLocked reports the cumulative engine-unit tokens of the
-// target segment's (session, pod) chain through the target, valid only when
-// every segment up to and including it is intact. Callers must hold v.mu.
-func (v *InMemorySessionView) intactThroughLocked(target *segment) (int, string, bool) {
-	state, ok := v.sessions[target.sessionTag]
-	if !ok {
-		return 0, "", false
-	}
-	chain, ok := state.pods[target.pod]
-	if !ok {
-		return 0, "", false
-	}
-	tokens, tier := 0, ""
-	for _, seg := range chain.segments {
-		if !seg.intact() {
-			return 0, "", false
-		}
-		tokens += seg.tokens
-		tier = seg.tier
-		if seg == target {
-			return tokens, tier, true
-		}
-	}
-	return 0, "", false
+// witness is one pod's evidence for a continuation id: whether the position's
+// blocks are intact there, and the engine-unit tokens they cover.
+type witness struct {
+	intact bool
+	tokens int
+	tier   string
 }
+
+// witnessByPodLocked collapses the segments stored under a continuation id to
+// one witness per pod, preferring an intact segment. Segments sharing a
+// continuation id share content-addressed blocks, so their intact state (and
+// token count) agree on a given pod; different pods are independent. Callers
+// must hold v.mu.
+func (v *InMemorySessionView) witnessByPodLocked(cid string) map[string]witness {
+	segs := v.contIndex[cid]
+	if len(segs) == 0 {
+		return nil
+	}
+	out := make(map[string]witness, len(segs))
+	for _, seg := range segs {
+		w, ok := out[seg.pod]
+		if !ok {
+			out[seg.pod] = witness{intact: seg.intact(), tokens: seg.tokens, tier: seg.tier}
+			continue
+		}
+		if !w.intact && seg.intact() {
+			out[seg.pod] = witness{intact: true, tokens: seg.tokens, tier: seg.tier}
+		}
+	}
+	return out
+}
+
 
 // RemoveExpired drops sessions idle past the TTL. The view runs no background
 // sweeper of its own; callers invoke it periodically. Independently, an
